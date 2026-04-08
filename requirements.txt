@@ -1,0 +1,9 @@
+torch==2.5.1
+torchvision
+torchaudio
+ultralyticsplus==0.0.28
+ultralytics==8.0.43
+numpy<2.0.0
+supervision
+motmetrics
+python-opencv

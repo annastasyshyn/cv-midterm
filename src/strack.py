@@ -129,6 +129,8 @@ class STrack:
 
         self.score = new_track.score
 
+        self.curr_feat = new_track.curr_feat
+
     @property
     def tlwh(self) -> npt.NDArray[np.float32]:
         """Get current position in bounding box format `(top left x, top left y,

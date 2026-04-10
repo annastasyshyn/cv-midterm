@@ -49,8 +49,6 @@ class ROIByteTrack:
             minimum_matching_threshold=0.8,
             frame_rate=30
         )
-        
-        self.nigger = 0
     
     @staticmethod
     def embedding_distance(strack_pool, detections): #TODO: make not static
@@ -80,6 +78,8 @@ class ROIByteTrack:
         )
 
         cost_matrix = 1 - cos_sim
+        
+        cost_matrix = torch.clamp(cost_matrix, 0, 1)
 
         return cost_matrix.cpu().numpy()
         
@@ -336,6 +336,7 @@ class ROIByteTrack:
 
             for frame_idx, img_path in enumerate(image_paths):
                 frame = cv2.imread(img_path)
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 if frame is None:
                     continue
 
@@ -441,7 +442,7 @@ def main():
                            "output_images_tracked",  #p ath to output tracked objects on the image
                            mot_metricks_path,
                            use_roi = True,
-                           roi_coef = 0.2
+                           roi_coef = 0.25
                            )
 
     track.evaluate_mot("../task1_2/VisDrone2019-MOT-test-dev/annotations/uav0000009_03358_v.txt", #path to annotations

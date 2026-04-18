@@ -31,7 +31,6 @@ class TripletDataset(Dataset):
     def __init__(self, dataset_dir, max_frame_delta=5, transform=None):
         self.dataset_dir = dataset_dir
         self.max_frame_delta = max_frame_delta
-        self.triplets = []
 
         self.frame_transform = transform or T.Compose(
             [
@@ -42,31 +41,31 @@ class TripletDataset(Dataset):
             ]
         )
 
-        self.build_triplets()
+        self.identity_index = {}
+        self.identity_keys = []
+        self.build_index()
 
     def __len__(self):
-        return len(self.triplets)
+        return len(self.identity_keys)
 
     def __getitem__(self, idx):
-        triplet = self.triplets[idx]
-        seq = triplet["seq"]
-        seq_path = os.path.join(self.dataset_dir, "sequences", seq)
+        key = self.identity_keys[idx]
+        seq_path = os.path.join(self.dataset_dir, "sequences", key[0])
+        entries = self.identity_index[key]
+        frame_id, bbox = entries[np.random.randint(len(entries))]
+        img = self.frame_transform(self.load_frame(seq_path, frame_id))
+        return (
+            img,
+            torch.tensor(bbox, dtype=torch.float32),
+            torch.tensor(idx, dtype=torch.long),
+            torch.tensor(frame_id, dtype=torch.long),
+        )
 
         anchor_img = self.load_frame(seq_path, triplet["anchor_frame"])
         positive_img = self.load_frame(seq_path, triplet["positive_frame"])
         negative_img = self.load_frame(seq_path, triplet["negative_frame"])
 
-        anchor = self.frame_transform(anchor_img)
-        positive = self.frame_transform(positive_img)
-        negative = self.frame_transform(negative_img)
-
-        anchor_box = torch.tensor(triplet["anchor_bbox"], dtype=torch.float32)
-        positive_box = torch.tensor(triplet["positive_bbox"], dtype=torch.float32)
-        negative_box = torch.tensor(triplet["negative_bbox"], dtype=torch.float32)
-
-        return anchor, anchor_box, positive, positive_box, negative, negative_box
-
-    def build_triplets(self):
+    def build_index(self):
         sequences_dir = os.path.join(self.dataset_dir, "sequences")
         annotations_dir = os.path.join(self.dataset_dir, "annotations")
 
@@ -79,45 +78,51 @@ class TripletDataset(Dataset):
             if not os.path.exists(anno_file):
                 continue
 
-            annotations = self.parse_annotations(anno_file)
+            for track_id, frames_data in self.parse_annotations(anno_file).items():
+                entries = sorted(frames_data.items()) 
+                if len(entries) >= 2:
+                    self.identity_index[(seq, track_id)] = entries
 
-            for track_id, frames_data in annotations.items():
-                sorted_frames = sorted(frames_data.keys())
+        self.identity_keys = list(self.identity_index.keys())
 
-                for i, frame_idx in enumerate(sorted_frames):
-                    for j in range( # TODO: sample because too namy triplets n^2
-                        i + 1, min(i + self.max_frame_delta + 1, len(sorted_frames))
-                    ):
-                        pos_frame = sorted_frames[j]
-                        other_tracks = [
-                            tid
-                            for tid in annotations.keys()
-                            if tid != track_id and frame_idx in annotations[tid]
-                        ]
+    def sample_nk_batch(self, n_ids: int, k_per_id: int, max_k: int):
+        n_avail = len(self.identity_keys)
+        chosen = np.random.choice(n_avail, size=min(n_ids, n_avail), replace=False)
 
-                        if other_tracks:
-                            neg_track = np.random.choice(other_tracks)
-                            if frame_idx in annotations[neg_track]:
-                                neg_frame = frame_idx
-                            else:
-                                neg_frame = np.random.choice(list(annotations[neg_track].keys()))
+        all_imgs, all_boxes, all_labels, all_frame_ids = [], [], [], []
 
-                            # TODO: hard negatives mining 
+        for local_label, key_idx in enumerate(chosen):
+            key = self.identity_keys[key_idx]
+            entries = self.identity_index[key]
+            seq_path = os.path.join(self.dataset_dir, "sequences", key[0])
 
-                            self.triplets.append(
-                                {
-                                    "seq": seq,
-                                    "anchor_frame": frame_idx,
-                                    "anchor_track": track_id,
-                                    "anchor_bbox": frames_data[frame_idx],
-                                    "positive_frame": pos_frame,
-                                    "positive_track": track_id,
-                                    "positive_bbox": frames_data[pos_frame],
-                                    "negative_frame": neg_frame,
-                                    "negative_track": neg_track,
-                                    "negative_bbox": annotations[neg_track][neg_frame],
-                                }
-                            )
+            anchor_i = np.random.randint(len(entries))
+            lo = max(0, anchor_i - max_k)
+            hi = min(len(entries), anchor_i + max_k + 1)
+            window = [i for i in range(lo, hi) if i != anchor_i]
+
+            if not window:
+                window = [i for i in range(len(entries)) if i != anchor_i]
+
+            n_extra = min(k_per_id - 1, len(window))
+            picked_indices = [anchor_i] + list(
+                np.random.choice(window, size=n_extra, replace=False)
+            )
+
+            for sidx in picked_indices:
+                frame_id, bbox = entries[sidx]
+                img = self.frame_transform(self.load_frame(seq_path, frame_id))
+                all_imgs.append(img)
+                all_boxes.append(torch.tensor(bbox, dtype=torch.float32))
+                all_labels.append(local_label)
+                all_frame_ids.append(frame_id)
+
+        return (
+            torch.stack(all_imgs),
+            torch.stack(all_boxes),
+            torch.tensor(all_labels, dtype=torch.long),
+            torch.tensor(all_frame_ids, dtype=torch.long),
+        )
 
     def parse_annotations(self, anno_file):
         annotations = {}
@@ -127,28 +132,30 @@ class TripletDataset(Dataset):
                 frame_id = int(parts[0])
                 track_id = int(parts[1])
                 x, y, w, h = int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5])
-                x1, y1 = x, y
-                x2, y2 = x + w, y + h
-
                 if track_id not in annotations:
                     annotations[track_id] = {}
-                annotations[track_id][frame_id] = (x1, y1, x2, y2)
-
+                annotations[track_id][frame_id] = (x, y, x + w, y + h)
         return annotations
 
     def load_frame(self, seq_path, frame_id):
-        img_name = f"{frame_id:07d}.jpg"
-        img_path = os.path.join(seq_path, img_name)
+        img_path = os.path.join(seq_path, f"{frame_id:07d}.jpg")
         img = cv2.imread(img_path)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        return img
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
 class EmbeddingModel(nn.Module):
-    def __init__(self, base, out_dim=128, roi_out=(7, 7), roi_spatial_scale=1.0 / 32.0):
+    def __init__(
+        self,
+        base,
+        num_classes,
+        out_dim=128,
+        roi_out=(7, 7),
+        roi_spatial_scale=1.0 / 32.0,
+    ):
         super().__init__()
 
         # base = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
+
         self.backbone = nn.Sequential(
             base.conv1,
             base.bn1,
@@ -170,6 +177,9 @@ class EmbeddingModel(nn.Module):
             nn.Linear(512, out_dim),
         )
 
+        # self.classifier = nn.Linear(out_dim, num_classes) if num_classes > 0 else None
+        self.classifier = None
+
     def forward(self, images, rois):
         feat = self.backbone(images)  # [B, 2048, H/32, W/32]
 
@@ -187,31 +197,111 @@ class EmbeddingModel(nn.Module):
         return emb
 
 
-def train_triplet(model, dataloader, optimizer, margin=1.0, device="cuda"):
+def save_checkpoint(path, model, optimizer, step, config):
+    torch.save(
+        {
+            "step": step,
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "config": config,
+        },
+        path,
+    )
+
+
+def triplet_loss(
+    emb: torch.Tensor,
+    labels: torch.Tensor,
+    frame_ids: torch.Tensor,
+    margin: float,
+    max_k: int,
+    hard_negatives: bool = True,
+) -> torch.Tensor:
+
+    B = emb.size(0)
+    idx = torch.arange(B, device=emb.device)
+    losses = []
+
+    for i in range(B):
+        pos_mask = (labels == labels[i]) & (idx != i)
+        neg_mask = labels != labels[i]
+
+        if not pos_mask.any() or not neg_mask.any():
+            continue
+
+        frame_deltas = (frame_ids - frame_ids[i]).abs().float()
+
+        within_k = pos_mask & (frame_deltas <= max_k)
+        candidates = within_k if within_k.any() else pos_mask
+        pos_idxs = candidates.nonzero(as_tuple=True)[0]
+
+        j = pos_idxs[frame_deltas[pos_idxs].argmin()].item()
+
+        if hard_negatives:
+            neg_dists = nn.functional.pairwise_distance(emb[i : i + 1], emb)
+            neg_dists[~neg_mask] = float("inf")
+            k = neg_dists.argmin().item()
+        else:
+            neg_idxs = neg_mask.nonzero(as_tuple=True)[0]
+            k = neg_idxs[torch.randint(len(neg_idxs), (1,), device=emb.device)].item()
+
+        d_pos = nn.functional.pairwise_distance(emb[i : i + 1], emb[j : j + 1])
+        d_neg = nn.functional.pairwise_distance(emb[i : i + 1], emb[k : k + 1])
+        dynamic_margin = margin * (1.0 + frame_deltas[j] / max_k)
+
+        losses.append(nn.functional.relu(d_pos - d_neg + dynamic_margin))
+
+    if not losses:
+        return emb.sum() * 0.0
+
+    return torch.cat(losses).mean()
+
+
+def train_triplet(
+    model,
+    dataset,
+    optimizer,
+    steps=1000,
+    n_ids=8,
+    k_per_id=4,
+    margin=1.0,
+    max_k=5,
+    ce_weight=0.5,
+    hard_negatives=True,
+    freeze_backbone=False,
+    device="cuda",
+):
+    if freeze_backbone:
+        for p in model.backbone.parameters():
+            p.requires_grad_(False)
+
     model.train()
-    criterion = nn.TripletMarginLoss(margin=margin)
-    for batch in tqdm(dataloader, desc="triplet"):
-        anchor_img, anchor_box, pos_img, pos_box, neg_img, neg_box = batch
+    ce_fn = (
+        nn.CrossEntropyLoss()
+        if (model.classifier is not None and ce_weight > 0)
+        else None
+    )
 
-        anchor_img = anchor_img.to(device)
-        pos_img = pos_img.to(device)
-        neg_img = neg_img.to(device)
+    for _ in tqdm(range(steps), desc="reid"):
+        imgs, boxes, labels, frame_ids = dataset.sample_nk_batch(n_ids, k_per_id, max_k)
 
-        anchor_box = anchor_box.to(device)
-        pos_box = pos_box.to(device)
-        neg_box = neg_box.to(device)
+        imgs = imgs.to(device)
+        boxes = boxes.to(device)
+        labels = labels.to(device)
+        frame_ids = frame_ids.to(device)
 
-        anchor_rois = build_rois_xyxy(anchor_box)
-        pos_rois = build_rois_xyxy(pos_box)
-        neg_rois = build_rois_xyxy(neg_box)
+        rois = build_rois_xyxy(boxes)
 
         optimizer.zero_grad()
+        emb = model(imgs, rois)
 
-        anchor_emb = model(anchor_img, anchor_rois)
-        pos_emb = model(pos_img, pos_rois)
-        neg_emb = model(neg_img, neg_rois)
+        loss = triplet_loss(emb, labels, frame_ids, margin, max_k, hard_negatives)
 
-        loss = criterion(anchor_emb, pos_emb, neg_emb)
+        if ce_fn is not None:
+            unique_labels, remapped = torch.unique(labels, return_inverse=True)
+            logits = model.classifier(emb)
+            loss = loss + ce_weight * ce_fn(logits[:, : len(unique_labels)], remapped)
+
         loss.backward()
         optimizer.step()
 
@@ -225,44 +315,61 @@ if __name__ == "__main__":
     model.overrides["agnostic_nms"] = False
     model.overrides["max_det"] = 1000
 
-    # training embedding model
-    embedding_model = EmbeddingModel(resnet50(weights=ResNet50_Weights.IMAGENET1K_V1))
+    max_k = 5
+    dataset = TripletDataset(dataset_dir="VisDrone2019-MOT-val", max_frame_delta=max_k)
+    n_ids = len(dataset.identity_keys)
+
+    embedding_model = EmbeddingModel(
+        resnet50(weights=ResNet50_Weights.IMAGENET1K_V1),
+        num_classes=n_ids,
+    )
     embedding_model.to(device)
     optimizer = torch.optim.Adam(embedding_model.parameters(), lr=1e-4)
-    dataset = TripletDataset(dataset_dir="VisDrone2019-MOT-val", max_frame_delta=5)
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=4)
-    train_triplet(embedding_model, dataloader, optimizer, margin=1.0, device=device)
 
-    triplet_model_path = "triplet_embedding_model.pth"
-    torch.save(embedding_model.state_dict(), triplet_model_path)
+    train_triplet(
+        embedding_model,
+        dataset,
+        optimizer,
+        steps=1000,
+        n_ids=8,
+        k_per_id=4,
+        margin=1.0,
+        max_k=max_k,
+        ce_weight=0.5,
+        freeze_backbone=False,
+        device=device,
+    )
 
-    reid_model = resnet50(
-        weights=ResNet50_Weights.IMAGENET1K_V1
-    )  # model for feature extraction
-    reid_model.fc = torch.nn.Identity()
-    reid_model.to(device).eval()
+    save_checkpoint(
+        "triplet_embedding_model.pth",
+        embedding_model,
+        optimizer,
+        step=1000,
+        config=dict(
+            steps=1000, n_ids=8, k_per_id=4, margin=1.0,
+            max_k=max_k, ce_weight=0.5, hard_negatives=True,
+            freeze_backbone=False,
+        ),
+    )
 
     track = ROIByteTrack(
         model=model,
-        #  reid_model=reid_model,
         reid_model=embedding_model,
         device=device,
     )
 
-    mot_metricks_path = "detection_metrics_sml.txt"  # path where mot metricks will be stored, maybe will rework this
+    mot_metricks_path = "detection_metrics_sml.txt"
 
     track.process_tracking(
-        # "../task1_2/VisDrone2019-MOT-test-dev/sequences/uav0000009_03358_v", # path to dataset image sequence
-        "VisDrone2019-MOT-val/sequences/uav0000086_00000_v",  # path to dataset image sequence
-        "output_images_tracked",  # path to output tracked objects on the image
+        "VisDrone2019-MOT-val/sequences/uav0000086_00000_v",
+        "output_images_tracked",
         mot_metricks_path,
         use_roi=True,
         roi_coef=0.25,
     )
 
     track.evaluate_mot(
-        # "../task1_2/VisDrone2019-MOT-test-dev/annotations/uav0000009_03358_v.txt", #path to annotations
-        "VisDrone2019-MOT-val/annotations/uav0000086_00000_v.txt",  # path to annotations
+        "VisDrone2019-MOT-val/annotations/uav0000086_00000_v.txt",
         mot_metricks_path,
         verbose=True,
     )

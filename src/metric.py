@@ -22,7 +22,7 @@ class TripletDataset(Dataset):
                  crop_size=(256, 128)):
         self.dataset_dir = dataset_dir
         self.max_frame_delta = max_frame_delta
-        self.crop_size = crop_size  # (H, W)
+        self.crop_size = crop_size
 
         self.crop_transform = transform or T.Compose(
             [
@@ -174,8 +174,8 @@ class EmbeddingModel(nn.Module):
         self.classifier = None
 
     def forward(self, images):
-        feat = self.backbone(images)  # [B, 2048, H/32, W/32]
-        emb = self.head(feat)         # [B, out_dim]
+        feat = self.backbone(images)
+        emb = self.head(feat) 
         emb = nn.functional.normalize(emb, p=2, dim=1)
         return emb
 

@@ -6,4 +6,6 @@ ultralytics==8.0.43
 numpy<2.0.0
 supervision
 motmetrics
-python-opencv
+opencv-python
+hydra-core
+omegaconf

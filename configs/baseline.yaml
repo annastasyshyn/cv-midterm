@@ -17,18 +17,18 @@ detection:
   imgsz: 1024
 
 tracking:
-  use_roi: true
-  roi_coef: 0.25 # weight of embedding distance vs IOU distance (0=pure IOU, 1=pure embedding)
+  use_roi: false
+  roi_coef: 0.25
   track_activation_threshold: 0.25
   lost_track_buffer: 30
   minimum_matching_threshold: 0.8
   frame_rate: 30
 
 reid:
-  type: pretrained # pretrained or metric_learning
+  type: pretrained           # pretrained | metric_learning
   backbone: resnet50
   weights: IMAGENET1K_V1
-  checkpoint: null # not used for pretrained
+  checkpoint: null           # unused for pretrained
   out_dim: 128
   roi_out: [7, 7]
   roi_spatial_scale: 0.03125 # 1/32

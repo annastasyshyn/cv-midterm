@@ -4,8 +4,6 @@ import numpy as np
 import pandas as pd
 import motmetrics as mm
 import supervision as sv
-from torchvision.ops import roi_align
-
 # from ultralytics import YOLO
 from ultralyticsplus import YOLO
 
@@ -19,23 +17,17 @@ from tqdm import tqdm
 from roi_bytetrack import ROIByteTrack
 
 
-def build_rois_xyxy(boxes_xyxy: torch.Tensor) -> torch.Tensor:
-    b = boxes_xyxy.shape[0]
-    batch_idx = torch.arange(
-        b, device=boxes_xyxy.device, dtype=boxes_xyxy.dtype
-    ).unsqueeze(1)
-    return torch.cat([batch_idx, boxes_xyxy], dim=1)
-
-
 class TripletDataset(Dataset):
-    def __init__(self, dataset_dir, max_frame_delta=5, transform=None):
+    def __init__(self, dataset_dir, max_frame_delta=5, transform=None,
+                 crop_size=(256, 128)):
         self.dataset_dir = dataset_dir
         self.max_frame_delta = max_frame_delta
+        self.crop_size = crop_size  # (H, W)
 
-        self.frame_transform = transform or T.Compose(
+        self.crop_transform = transform or T.Compose(
             [
                 T.ToPILImage(),
-                T.Resize((720, 1280)),
+                T.Resize(crop_size),
                 T.ToTensor(),
                 T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ]
@@ -53,17 +45,18 @@ class TripletDataset(Dataset):
         seq_path = os.path.join(self.dataset_dir, "sequences", key[0])
         entries = self.identity_index[key]
         frame_id, bbox = entries[np.random.randint(len(entries))]
-        img = self.frame_transform(self.load_frame(seq_path, frame_id))
+        frame = self.load_frame(seq_path, frame_id)
+        x1, y1, x2, y2 = map(int, bbox)
+        h, w = frame.shape[:2]
+        raw = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+        if raw.size == 0:
+            raw = np.zeros((self.crop_size[0], self.crop_size[1], 3), dtype=np.uint8)
+        crop = self.crop_transform(raw)
         return (
-            img,
-            torch.tensor(bbox, dtype=torch.float32),
+            crop,
             torch.tensor(idx, dtype=torch.long),
             torch.tensor(frame_id, dtype=torch.long),
         )
-
-        anchor_img = self.load_frame(seq_path, triplet["anchor_frame"])
-        positive_img = self.load_frame(seq_path, triplet["positive_frame"])
-        negative_img = self.load_frame(seq_path, triplet["negative_frame"])
 
     def build_index(self):
         sequences_dir = os.path.join(self.dataset_dir, "sequences")
@@ -89,7 +82,7 @@ class TripletDataset(Dataset):
         n_avail = len(self.identity_keys)
         chosen = np.random.choice(n_avail, size=min(n_ids, n_avail), replace=False)
 
-        all_imgs, all_boxes, all_labels, all_frame_ids = [], [], [], []
+        all_crops, all_labels, all_frame_ids = [], [], []
 
         for local_label, key_idx in enumerate(chosen):
             key = self.identity_keys[key_idx]
@@ -111,15 +104,19 @@ class TripletDataset(Dataset):
 
             for sidx in picked_indices:
                 frame_id, bbox = entries[sidx]
-                img = self.frame_transform(self.load_frame(seq_path, frame_id))
-                all_imgs.append(img)
-                all_boxes.append(torch.tensor(bbox, dtype=torch.float32))
+                frame = self.load_frame(seq_path, frame_id)
+                x1, y1, x2, y2 = map(int, bbox)
+                h, w = frame.shape[:2]
+                raw = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+                if raw.size == 0:
+                    raw = np.zeros((self.crop_size[0], self.crop_size[1], 3), dtype=np.uint8)
+                crop = self.crop_transform(raw)
+                all_crops.append(crop)
                 all_labels.append(local_label)
                 all_frame_ids.append(frame_id)
 
         return (
-            torch.stack(all_imgs),
-            torch.stack(all_boxes),
+            torch.stack(all_crops),
             torch.tensor(all_labels, dtype=torch.long),
             torch.tensor(all_frame_ids, dtype=torch.long),
         )
@@ -149,8 +146,6 @@ class EmbeddingModel(nn.Module):
         base,
         num_classes,
         out_dim=128,
-        roi_out=(7, 7),
-        roi_spatial_scale=1.0 / 32.0,
     ):
         super().__init__()
 
@@ -167,12 +162,10 @@ class EmbeddingModel(nn.Module):
             base.layer4,
         )
 
-        self.roi_output_size = roi_out
-        self.roi_spatial_scale = roi_spatial_scale
-
         self.head = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(2048 * roi_out[0] * roi_out[1], 512),
+            nn.Linear(2048, 512),
             nn.ReLU(),
             nn.Linear(512, out_dim),
         )
@@ -180,19 +173,9 @@ class EmbeddingModel(nn.Module):
         # self.classifier = nn.Linear(out_dim, num_classes) if num_classes > 0 else None
         self.classifier = None
 
-    def forward(self, images, rois):
+    def forward(self, images):
         feat = self.backbone(images)  # [B, 2048, H/32, W/32]
-
-        roi_feat = roi_align(
-            input=feat,
-            boxes=rois,
-            output_size=self.roi_output_size,
-            spatial_scale=self.roi_spatial_scale,
-            sampling_ratio=2,
-            aligned=True,
-        )  # [N, 2048, 7, 7]
-
-        emb = self.head(roi_feat)  # [N, out_dim]
+        emb = self.head(feat)         # [B, out_dim]
         emb = nn.functional.normalize(emb, p=2, dim=1)
         return emb
 
@@ -283,17 +266,14 @@ def train_triplet(
     )
 
     for _ in tqdm(range(steps), desc="reid"):
-        imgs, boxes, labels, frame_ids = dataset.sample_nk_batch(n_ids, k_per_id, max_k)
+        crops, labels, frame_ids = dataset.sample_nk_batch(n_ids, k_per_id, max_k)
 
-        imgs = imgs.to(device)
-        boxes = boxes.to(device)
+        crops = crops.to(device)
         labels = labels.to(device)
         frame_ids = frame_ids.to(device)
 
-        rois = build_rois_xyxy(boxes)
-
         optimizer.zero_grad()
-        emb = model(imgs, rois)
+        emb = model(crops)
 
         loss = triplet_loss(emb, labels, frame_ids, margin, max_k, hard_negatives)
 

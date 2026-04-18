@@ -39,8 +39,9 @@ class ROIByteTrack:
             T.ToTensor(),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
-
-
+        self.mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(device)
+        self.std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(device)
+    
         self.box_annotator = sv.BoxAnnotator()
         self.label_annotator = sv.LabelAnnotator()
         self.tracker = sv.ByteTrack(
@@ -253,30 +254,51 @@ class ROIByteTrack:
         frame: cv2 image
         boxes: numpy array (N, 4) в форматі xyxy
         """
+        # if len(boxes) == 0:
+        #     return torch.empty((0, 2048)).to(self.device)
+
+        # rois = torch.zeros((len(boxes), 5)).to(self.device)
+        # rois[:, 1:] = boxes
+        
+        # crops = []
+        # for box in boxes:
+
+        #     x1, y1, x2, y2 = map(int, box)
+
+        #     crop = frame[y1:y2, x1:x2]
+
+        #     if crop.size == 0:
+        #         crop = np.zeros((256, 128, 3), dtype=np.uint8)
+
+        #     crops.append(self.preprocess(crop))
+        
+        # crops_tensor = torch.stack(crops).to(self.device)
+        
+        # with torch.no_grad():
+        #     embeddings = self.reid_model(crops_tensor)
+
+        # return embeddings
+        if boxes is None or len(boxes) == 0:
+            return torch.empty((0, 128), device=self.device)
+
+        frame_t = torch.from_numpy(frame).to(self.device).permute(2, 0, 1).float() / 255.0
+        frame_t = ((frame_t - self.mean) / self.std).unsqueeze(0)
+
+        boxes = torch.as_tensor(boxes, dtype=torch.float32, device=self.device)
+
+        _, _, h, w = frame_t.shape
+        boxes[:, [0, 2]] = boxes[:, [0, 2]].clamp(0, w - 1)
+        boxes[:, [1, 3]] = boxes[:, [1, 3]].clamp(0, h - 1)
+
+        boxes = boxes[(boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])]
         if len(boxes) == 0:
-            return torch.empty((0, 2048)).to(self.device)
+            return torch.empty((0, 128), device=self.device)
 
-        rois = torch.zeros((len(boxes), 5)).to(self.device)
-        rois[:, 1:] = boxes
-        
-        crops = []
-        for box in boxes:
+        rois = torch.cat([torch.zeros((len(boxes), 1), device=self.device), boxes], dim=1)
 
-            x1, y1, x2, y2 = map(int, box)
-
-            crop = frame[y1:y2, x1:x2]
-
-            if crop.size == 0:
-                crop = np.zeros((256, 128, 3), dtype=np.uint8)
-
-            crops.append(self.preprocess(crop))
-        
-        crops_tensor = torch.stack(crops).to(self.device)
-        
         with torch.no_grad():
-            embeddings = self.reid_model(crops_tensor)
+            return self.reid_model(frame_t, rois)
 
-        return embeddings
 
     def update_with_detections_roi(self, detections: Detections, embeddings = None, roi_coef = 0.5) -> Detections:
         """
@@ -317,7 +339,7 @@ class ROIByteTrack:
             return detections
 
 
-    def process_traching(self, 
+    def process_tracking(self, 
                          source_dir, 
                          target_dir, 
                          mot_file_path = "detection_metrics.txt", 
@@ -438,7 +460,7 @@ def main():
     
     mot_metricks_path = "detection_metrics.txt" # path where mot metricks will be stored, maybe will rework this
     
-    track.process_traching("../task1_2/VisDrone2019-MOT-test-dev/sequences/uav0000009_03358_v", # path to dataset image sequence
+    track.process_tracking("../task1_2/VisDrone2019-MOT-test-dev/sequences/uav0000009_03358_v", # path to dataset image sequence
                            "output_images_tracked",  #p ath to output tracked objects on the image
                            mot_metricks_path,
                            use_roi = True,

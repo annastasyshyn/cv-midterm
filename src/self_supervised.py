@@ -43,9 +43,17 @@ def build_contrastive_augmentations(height: int = 256, width: int = 128):
 
 
 class AugmentedInstanceDataset(Dataset):
-    def __init__(self, dataset_dir, crop_size=(256, 128), aug_strength='strong'):
+    def __init__(self, dataset_dir, crop_size=(256, 128), aug_strength='strong',
+                 sequence_filter=None):
+        """
+        dataset_dir: root with `sequences/` + `annotations/` subdirs.
+        sequence_filter: optional iterable of sequence names — when provided,
+          only those sequences are indexed (lets the caller reuse the same
+          root for Option-B single-seq eval by passing `[seq_name]`).
+        """
         self.dataset_dir = dataset_dir
         self.crop_size = crop_size
+        self.sequence_filter = set(sequence_filter) if sequence_filter else None
 
         self.aug_pipeline1, self.aug_pipeline2 = build_contrastive_augmentations(
             height=crop_size[0], width=crop_size[1]
@@ -80,6 +88,8 @@ class AugmentedInstanceDataset(Dataset):
         annotations_dir = os.path.join(self.dataset_dir, "annotations")
 
         for seq in sorted(os.listdir(sequences_dir)):
+            if self.sequence_filter is not None and seq not in self.sequence_filter:
+                continue
             seq_path = os.path.join(sequences_dir, seq)
             if not os.path.isdir(seq_path):
                 continue

@@ -329,6 +329,40 @@ def _ssl_pretrain(cfg, device):
     print(f"[ssl/train] pretrain checkpoint → {cfg.reid.checkpoint_pretrain}")
 
 
+def _build_heldout_ssl_dataset(cfg, crop_size):
+    """
+    Build an AugmentedInstanceDataset over whatever test-dev data is configured:
+      - data.test.mot_root set → all sequences under it (full test-dev).
+      - else data.test.mot_sequence set → a single sequence via sequence_filter.
+      - else → None (caller skips val-loss).
+    """
+    from self_supervised import AugmentedInstanceDataset
+
+    mot_root = OmegaConf.select(cfg, "data.test.mot_root")
+    if mot_root:
+        ds = AugmentedInstanceDataset(dataset_dir=mot_root, crop_size=crop_size)
+        print(f"[ssl/test] held-out crops (full test-dev): {len(ds)}  (root={mot_root})")
+        return ds
+
+    seq_path = OmegaConf.select(cfg, "data.test.mot_sequence")
+    if not seq_path:
+        print("[ssl/test] no data.test.mot_root or mot_sequence — skipping held-out loss")
+        return None
+
+    # Derive the test-dev root + sequence name from the single-seq path.
+    # Path layout: <root>/sequences/<seq_name>
+    seq_path = seq_path.rstrip("/")
+    seq_name = os.path.basename(seq_path)
+    seq_root = os.path.dirname(os.path.dirname(seq_path))
+    ds = AugmentedInstanceDataset(
+        dataset_dir=seq_root,
+        crop_size=crop_size,
+        sequence_filter=[seq_name],
+    )
+    print(f"[ssl/test] held-out crops (single seq): {len(ds)}  (seq={seq_name})")
+    return ds
+
+
 def _ssl_test(cfg, det_model, device):
     """
     mode=test: load pretrain → finetune projector on data.val.root → save
@@ -368,17 +402,17 @@ def _ssl_test(cfg, det_model, device):
             drop_last=True,
         )
 
-        # Held-out validation loss on test-dev crops (requires data.test.mot_root).
-        # Reports the InfoNCE signal on data the model has never seen while
-        # finetuning on data.val.root — a sanity check that finetuning isn't
-        # just overfitting to val.
+        # Held-out validation loss on the test-dev crops. Works in both modes:
+        #   Option A — mot_root set: index every sequence under the root
+        #   Option B — mot_root null, mot_sequence set: index just that one sequence
+        # This mirrors the final MOT eval dispatch so the "val loss" curve on
+        # the overview plot always reflects the same test data the final
+        # metrics are reported on.
         heldout_loader = None
         val_every = int(OmegaConf.select(cfg, "testing.val_every") or 0)
         if val_every > 0:
-            test_root = OmegaConf.select(cfg, "data.test.mot_root")
-            if test_root:
-                heldout_ds = AugmentedInstanceDataset(dataset_dir=test_root, crop_size=crop_size)
-                print(f"[ssl/test] val-loss crops (test-dev): {len(heldout_ds)}  (root={test_root})")
+            heldout_ds = _build_heldout_ssl_dataset(cfg, crop_size)
+            if heldout_ds is not None:
                 heldout_loader = DataLoader(
                     heldout_ds,
                     batch_size=cfg.testing.batch_size,
@@ -387,8 +421,6 @@ def _ssl_test(cfg, det_model, device):
                     pin_memory=cfg.testing.pin_memory,
                     drop_last=True,
                 )
-            else:
-                print("[ssl/test] val_every>0 but data.test.mot_root is null — skipping val loss")
 
         optimizer = torch.optim.Adam(trainable, lr=cfg.testing.lr)
         scheduler = _build_scheduler(

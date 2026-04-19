@@ -104,8 +104,10 @@ testing:
   pin_memory: true
   log_every: 10
   mot_eval_every: 0       # 0 = only final MOT eval on test-dev; >0 = periodic during finetuning (expensive)
-  val_every: 50           # steps between held-out InfoNCE loss on data.test.mot_root (0 disables)
-  val_max_batches: 20     # cap batches per val pass (null = full test-dev crop set, can be huge)
+  val_every: 50           # steps between held-out InfoNCE loss on the test data (0 disables).
+                          # Uses data.test.mot_root if set (all test-dev seqs),
+                          # otherwise falls back to data.test.mot_sequence (single-seq Option B).
+  val_max_batches: 20     # cap batches per val pass (null = full crop set, can be huge in Option A)
   scheduler:
     type: cosine
     warmup_steps: 100

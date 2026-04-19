@@ -1,6 +1,6 @@
 import hydra
 import torch
-from ultralytics import YOLO
+from ultralyticsplus import YOLO
 from torchvision.models import resnet50, ResNet50_Weights
 from roi_bytetrack import ROIByteTrack
 from omegaconf import DictConfig, OmegaConf
@@ -46,7 +46,9 @@ def build_reid_model(cfg: DictConfig, device: torch.device):
             )
             torch.save(model.state_dict(), cfg.reid.checkpoint)
         else:
-            model.load_state_dict(torch.load(cfg.reid.checkpoint, map_location=device))
+            checkpoint = torch.load(cfg.reid.checkpoint, map_location=device)
+            state_dict = checkpoint["model_state"] if isinstance(checkpoint, dict) and "model_state" in checkpoint else checkpoint
+            model.load_state_dict(state_dict)
 
         model.to(device).eval()
         return model

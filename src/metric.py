@@ -10,7 +10,7 @@ from ultralyticsplus import YOLO
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from torchvision.models import resnet50, ResNet50_Weights
 from tqdm import tqdm
 
@@ -18,8 +18,7 @@ from roi_bytetrack import ROIByteTrack
 
 
 class TripletDataset(Dataset):
-    def __init__(self, dataset_dir, max_frame_delta=5, transform=None,
-                 crop_size=(256, 128)):
+    def __init__(self, dataset_dir, max_frame_delta=5, transform=None, crop_size=(256, 128)):
         self.dataset_dir = dataset_dir
         self.max_frame_delta = max_frame_delta
         self.crop_size = crop_size
@@ -35,6 +34,7 @@ class TripletDataset(Dataset):
 
         self.identity_index = {}
         self.identity_keys = []
+        self.identity_labels = {}
         self.build_index()
 
     def __len__(self):
@@ -54,7 +54,7 @@ class TripletDataset(Dataset):
         crop = self.crop_transform(raw)
         return (
             crop,
-            torch.tensor(idx, dtype=torch.long),
+            torch.tensor(self.identity_labels[key], dtype=torch.long),
             torch.tensor(frame_id, dtype=torch.long),
         )
 
@@ -72,17 +72,18 @@ class TripletDataset(Dataset):
                 continue
 
             for track_id, frames_data in self.parse_annotations(anno_file).items():
-                entries = sorted(frames_data.items()) 
+                entries = sorted(frames_data.items())
                 if len(entries) >= 2:
                     self.identity_index[(seq, track_id)] = entries
 
         self.identity_keys = list(self.identity_index.keys())
+        self.identity_labels = {key: label for label, key in enumerate(self.identity_keys)}
 
     def sample_nk_batch(self, n_ids: int, k_per_id: int, max_k: int):
         n_avail = len(self.identity_keys)
         chosen = np.random.choice(n_avail, size=min(n_ids, n_avail), replace=False)
 
-        all_crops, all_labels, all_frame_ids = [], [], []
+        all_crops, all_labels, all_frame_ids, all_global_labels = [], [], [], []
 
         for local_label, key_idx in enumerate(chosen):
             key = self.identity_keys[key_idx]
@@ -98,9 +99,7 @@ class TripletDataset(Dataset):
                 window = [i for i in range(len(entries)) if i != anchor_i]
 
             n_extra = min(k_per_id - 1, len(window))
-            picked_indices = [anchor_i] + list(
-                np.random.choice(window, size=n_extra, replace=False)
-            )
+            picked_indices = [anchor_i] + list(np.random.choice(window, size=n_extra, replace=False))
 
             for sidx in picked_indices:
                 frame_id, bbox = entries[sidx]
@@ -114,11 +113,13 @@ class TripletDataset(Dataset):
                 all_crops.append(crop)
                 all_labels.append(local_label)
                 all_frame_ids.append(frame_id)
+                all_global_labels.append(self.identity_labels[key])
 
         return (
             torch.stack(all_crops),
             torch.tensor(all_labels, dtype=torch.long),
             torch.tensor(all_frame_ids, dtype=torch.long),
+            torch.tensor(all_global_labels, dtype=torch.long),
         )
 
     def parse_annotations(self, anno_file):
@@ -141,12 +142,7 @@ class TripletDataset(Dataset):
 
 
 class EmbeddingModel(nn.Module):
-    def __init__(
-        self,
-        base,
-        num_classes,
-        out_dim=128,
-    ):
+    def __init__(self, base, num_classes, out_dim=128, roi_out=None, roi_spatial_scale=None):
         super().__init__()
 
         # base = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
@@ -170,12 +166,12 @@ class EmbeddingModel(nn.Module):
             nn.Linear(512, out_dim),
         )
 
-        # self.classifier = nn.Linear(out_dim, num_classes) if num_classes > 0 else None
-        self.classifier = None
+        self.classifier = nn.Linear(out_dim, num_classes) if num_classes > 0 else None
+        # self.classifier = None
 
     def forward(self, images):
         feat = self.backbone(images)
-        emb = self.head(feat) 
+        emb = self.head(feat)
         emb = nn.functional.normalize(emb, p=2, dim=1)
         return emb
 
@@ -200,7 +196,6 @@ def triplet_loss(
     max_k: int,
     hard_negatives: bool = True,
 ) -> torch.Tensor:
-
     B = emb.size(0)
     idx = torch.arange(B, device=emb.device)
     losses = []
@@ -266,11 +261,12 @@ def train_triplet(
     )
 
     for _ in tqdm(range(steps), desc="reid"):
-        crops, labels, frame_ids = dataset.sample_nk_batch(n_ids, k_per_id, max_k)
+        crops, labels, frame_ids, global_labels = dataset.sample_nk_batch(n_ids, k_per_id, max_k)
 
         crops = crops.to(device)
         labels = labels.to(device)
         frame_ids = frame_ids.to(device)
+        global_labels = global_labels.to(device)
 
         optimizer.zero_grad()
         emb = model(crops)
@@ -278,9 +274,8 @@ def train_triplet(
         loss = triplet_loss(emb, labels, frame_ids, margin, max_k, hard_negatives)
 
         if ce_fn is not None:
-            unique_labels, remapped = torch.unique(labels, return_inverse=True)
             logits = model.classifier(emb)
-            loss = loss + ce_weight * ce_fn(logits[:, : len(unique_labels)], remapped)
+            loss = loss + ce_weight * ce_fn(logits, global_labels)
 
         loss.backward()
         optimizer.step()
@@ -296,7 +291,7 @@ if __name__ == "__main__":
     model.overrides["max_det"] = 1000
 
     max_k = 5
-    dataset = TripletDataset(dataset_dir="VisDrone2019-MOT-val", max_frame_delta=max_k)
+    dataset = TripletDataset(dataset_dir="VisDrone2019-MOT-train", max_frame_delta=max_k)
     n_ids = len(dataset.identity_keys)
 
     embedding_model = EmbeddingModel(
@@ -315,10 +310,12 @@ if __name__ == "__main__":
         k_per_id=4,
         margin=1.0,
         max_k=max_k,
-        ce_weight=0.5,
+        ce_weight=0.0,
         freeze_backbone=False,
         device=device,
     )
+
+    embedding_model.eval()
 
     save_checkpoint(
         "triplet_embedding_model.pth",
@@ -326,8 +323,13 @@ if __name__ == "__main__":
         optimizer,
         step=1000,
         config=dict(
-            steps=1000, n_ids=8, k_per_id=4, margin=1.0,
-            max_k=max_k, ce_weight=0.5, hard_negatives=True,
+            steps=1000,
+            n_ids=8,
+            k_per_id=4,
+            margin=1.0,
+            max_k=max_k,
+            ce_weight=0.0,
+            hard_negatives=True,
             freeze_backbone=False,
         ),
     )
@@ -340,16 +342,14 @@ if __name__ == "__main__":
 
     mot_metricks_path = "detection_metrics_sml.txt"
 
-    track.process_tracking(
-        "VisDrone2019-MOT-val/sequences/uav0000086_00000_v",
-        "output_images_tracked",
-        mot_metricks_path,
-        use_roi=True,
-        roi_coef=0.25,
-    )
+    track.process_tracking("VisDrone2019-MOT-test-dev/sequences/uav0000009_03358_v", # path to dataset image sequence
+                           "output_images_tracked",  #p ath to output tracked objects on the image
+                           mot_metricks_path,
+                           use_roi = True,
+                           roi_coef = 0.75
+                           )
 
-    track.evaluate_mot(
-        "VisDrone2019-MOT-val/annotations/uav0000086_00000_v.txt",
-        mot_metricks_path,
-        verbose=True,
-    )
+    track.evaluate_mot("VisDrone2019-MOT-test-dev/annotations/uav0000009_03358_v.txt", #path to annotations
+                       mot_metricks_path,
+                       verbose = True
+                       )

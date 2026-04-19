@@ -281,23 +281,22 @@ class ROIByteTrack:
         if boxes is None or len(boxes) == 0:
             return torch.empty((0, 128), device=self.device)
 
-        frame_t = torch.from_numpy(frame).to(self.device).permute(2, 0, 1).float() / 255.0
-        frame_t = ((frame_t - self.mean) / self.std).unsqueeze(0)
+        crops = []
+        for box in boxes:
+            x1, y1, x2, y2 = map(int, box)
+            crop = frame[y1:y2, x1:x2]
 
-        boxes = torch.as_tensor(boxes, dtype=torch.float32, device=self.device)
+            if crop.size == 0:
+                crop = np.zeros((256, 128, 3), dtype=np.uint8)
 
-        _, _, h, w = frame_t.shape
-        boxes[:, [0, 2]] = boxes[:, [0, 2]].clamp(0, w - 1)
-        boxes[:, [1, 3]] = boxes[:, [1, 3]].clamp(0, h - 1)
-
-        boxes = boxes[(boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])]
-        if len(boxes) == 0:
-            return torch.empty((0, 128), device=self.device)
-
-        rois = torch.cat([torch.zeros((len(boxes), 1), device=self.device), boxes], dim=1)
-
+            crops.append(self.preprocess(crop))
+        
+        crops_tensor = torch.stack(crops).to(self.device)
+        
         with torch.no_grad():
-            return self.reid_model(frame_t, rois)
+            embeddings = self.reid_model(crops_tensor)
+
+        return embeddings
 
 
     def update_with_detections_roi(self, detections: Detections, embeddings = None, roi_coef = 0.5) -> Detections:

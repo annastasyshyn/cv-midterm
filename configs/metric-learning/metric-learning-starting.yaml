@@ -1,14 +1,12 @@
 # @package _global_
 # Place the contents of this file at the config root rather than nesting under
-# the "self-supervised" group name (Hydra's default for configs in subdirs).
-# Without this directive, `cfg.models` would live at `cfg["self-supervised"].models`
-# and every access in eval.py would break.
+# the "metric-learning" group name (Hydra's default for configs in subdirs).
 
 models:
   detection-model: mshamrai/yolov8n-visdrone
 
 # Two modes:
-#   train — pretrain the SSL embedder on data.train.root → save reid.checkpoint_pretrain
+#   train — pretrain the triplet embedder on data.train.root → save reid.checkpoint_pretrain
 #   test  — load reid.checkpoint_pretrain, finetune on data.val.root → save reid.checkpoint_finetuned,
 #           then run the final MOT eval on data.test.mot_*
 
@@ -42,9 +40,9 @@ data:
     mot_root:        null # /workspace/cv-midterm/VisDrone2019-MOT-test-dev  # null → single-seq mode (Option B)
 
 output:
-  images_tracked: /workspace/cv-midterm/output_images_tracked_ssl
-  metrics_path:   /workspace/cv-midterm/detection_metrics_ssl.txt
-  history_path:   /workspace/cv-midterm/ssl_history_${mode}.json
+  images_tracked: /workspace/cv-midterm/output_images_tracked_ml
+  metrics_path:   /workspace/cv-midterm/detection_metrics_ml.txt
+  history_path:   /workspace/cv-midterm/ml_history_${mode}.json
 
 detection:
   conf: 0.25
@@ -55,34 +53,39 @@ detection:
 
 tracking:
   use_roi: true
-  roi_coef: 0.15
+  roi_coef: 0.25
   track_activation_threshold: 0.25
   lost_track_buffer: 30
   minimum_matching_threshold: 0.8
   frame_rate: 30
 
 reid:
-  type: self_supervised
+  type: metric_learning
   backbone: resnet50
   weights: IMAGENET1K_V1
-  checkpoint_pretrain:  /workspace/cv-midterm/ssl_pretrain.pth
-  checkpoint_finetuned: /workspace/cv-midterm/ssl_finetuned.pth
-  feat_dim: 2048
-  embed_dim: 128
-  temperature: 0.2
+  checkpoint_pretrain:  /workspace/cv-midterm/ml_pretrain.pth
+  checkpoint_finetuned: /workspace/cv-midterm/ml_finetuned.pth
+  out_dim: 128
   roi_out: [7, 7]
   roi_spatial_scale: 0.03125 # 1/32
 
 # hyperparams for mode=train (pretraining on data.train.root)
 training:
   steps: 50 # 5000
-  batch_size: 64
-  crop_size: [256, 128]
-  lr: 0.001
+  batch_size: 64       # unused by TripletDataset sampler, kept for parity with SSL config
+  lr: 0.0001
   num_workers: 4
   pin_memory: true
   log_every: 10
   seed: 69420
+  # triplet-specific
+  n_ids: 8             # identities per PK batch
+  k_per_id: 4          # samples per identity per batch
+  margin: 1.0          # base triplet margin
+  max_k: 5             # max frame delta for positive pair selection / dynamic margin
+  ce_weight: 0.5       # auxiliary cross-entropy weight (active only if model.classifier is set)
+  hard_negatives: true # hardest-negative mining
+  freeze_backbone: false
   scheduler:
     type: cosine       # none | cosine | step
     warmup_steps: 500  # linear warmup from lr*0.01 → lr (0 disables warmup)
@@ -94,13 +97,19 @@ training:
 testing:
   steps: 1000             # set to 0 to skip finetuning and evaluate the pretrain checkpoint directly
   batch_size: 64
-  crop_size: [256, 128]
-  lr: 0.0001              # smaller LR for finetuning
-  freeze_backbone: true   # only the projector is finetuned by default
+  lr: 0.00001             # smaller LR for finetuning
+  freeze_backbone: true   # only the head is finetuned by default
   num_workers: 4
   pin_memory: true
   log_every: 10
   mot_eval_every: 0       # 0 = only final MOT eval on test-dev; >0 = periodic during finetuning (expensive)
+  # triplet-specific (mirrors training:, typically kept equal or tightened)
+  n_ids: 8
+  k_per_id: 4
+  margin: 1.0
+  max_k: 5
+  ce_weight: 0.5
+  hard_negatives: true
   scheduler:
     type: cosine
     warmup_steps: 100

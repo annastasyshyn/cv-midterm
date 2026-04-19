@@ -6,8 +6,10 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim import Adam
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+from torchvision.models import resnet50, ResNet50_Weights
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 from ultralyticsplus import YOLO
@@ -31,7 +33,7 @@ def build_contrastive_augmentations(height: int = 256, width: int = 128):
             A.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1, p=0.8),
             A.ToGray(p=0.2),
             A.GaussianBlur(blur_limit=(3, 7), p=0.5),
-            A.CoarseDropout(max_holes=4, max_height=32, max_width=16, p=0.3),
+            A.CoarseDropout(max_holes=4, max_height=0.125, max_width=0.125, p=0.3),
             A.Normalize(mean=mean, std=std),
             ToTensorV2(),
         ])
@@ -221,47 +223,46 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "mps")
     
 
-    dataset = AugmentedInstanceDataset(dataset_dir="VisDrone2019-MOT-val")
+    dataset = AugmentedInstanceDataset(dataset_dir="VisDrone2019-MOT-train")
     print(f"Dataset size: {len(dataset)} instances")
     
 
-    from torchvision.models import resnet50, ResNet50_Weights
     backbone = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
     model = SelfSupervisedInstanceEmbedder(backbone).to(device)
     
-
-    view1, view2 = dataset[0]
-    view1_batch = view1.unsqueeze(0).to(device)
-    view2_batch = view2.unsqueeze(0).to(device)
+    optimizer = Adam(model.parameters(), lr=1e-3)
     
-    model.eval()
-    with torch.no_grad():
-        loss = model(view1_batch, view2_batch)
-    print(f"Test loss: {loss.item():.4f}")
-
-
-    detection_model = YOLO('mshamrai/yolov8n-visdrone') # model for detection
+    train_self_supervised(
+        model=model,
+        dataset=dataset,
+        optimizer=optimizer,
+        steps=200,
+        batch_size=64,
+        device=device,
+    )
+    
+    checkpoint_path = "triplet_embedding_model.pth"
+    torch.save(model.state_dict(), checkpoint_path)
+    print(f"Model saved to {checkpoint_path}")
+    
+    detection_model = YOLO('mshamrai/yolov8n-visdrone')
     detection_model.overrides['conf'] = 0.25
     detection_model.overrides['iou'] = 0.45
     detection_model.overrides['agnostic_nms'] = False
     detection_model.overrides['max_det'] = 1000
-
-    model.eval()
-
-    track = ROIByteTrack(model = detection_model,
+    
+    track = ROIByteTrack(model=detection_model,
                          reid_model=model,
                          device=device)
     
-    mot_metricks_path = "detection_metrics.txt" # path where mot metricks will be stored, maybe will rework this
+    mot_metricks_path = "detection_metrics.txt"
     
-    track.process_tracking("VisDrone2019-MOT-val/sequences/uav0000086_00000_v", # path to dataset image sequence
-                           "output_images_tracked",  #p ath to output tracked objects on the image
+    track.process_tracking("VisDrone2019-MOT-test-dev/sequences/uav0000009_03358_v",
+                           "output_images_tracked",
                            mot_metricks_path,
-                           use_roi = True,
-                           roi_coef = 0.25
-                           )
-
-    track.evaluate_mot("VisDrone2019-MOT-val/annotations/uav0000086_00000_v.txt", #path to annotations
+                           use_roi=True,
+                           roi_coef=0.5)
+    
+    track.evaluate_mot("VisDrone2019-MOT-test-dev/annotations/uav0000009_03358_v.txt",
                        mot_metricks_path,
-                       verbose = True
-                       )
+                       verbose=True)

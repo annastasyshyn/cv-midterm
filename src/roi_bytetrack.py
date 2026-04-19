@@ -281,22 +281,27 @@ class ROIByteTrack:
         if boxes is None or len(boxes) == 0:
             return torch.empty((0, 128), device=self.device)
 
+        if isinstance(boxes, torch.Tensor):
+            boxes_np = boxes.detach().cpu().numpy()
+        else:
+            boxes_np = np.array(boxes)
+
+        h, w = frame.shape[:2]
         crops = []
-        for box in boxes:
-            x1, y1, x2, y2 = map(int, box)
-            crop = frame[y1:y2, x1:x2]
-
-            if crop.size == 0:
+        for box in boxes_np:
+            x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            if x2 <= x1 or y2 <= y1:
                 crop = np.zeros((256, 128, 3), dtype=np.uint8)
-
+            else:
+                crop = frame[y1:y2, x1:x2]
             crops.append(self.preprocess(crop))
-        
-        crops_tensor = torch.stack(crops).to(self.device)
-        
-        with torch.no_grad():
-            embeddings = self.reid_model(crops_tensor)
 
-        return embeddings
+        crops_tensor = torch.stack(crops).to(self.device)
+
+        with torch.no_grad():
+            return self.reid_model(crops_tensor)
 
 
     def update_with_detections_roi(self, detections: Detections, embeddings = None, roi_coef = 0.5) -> Detections:

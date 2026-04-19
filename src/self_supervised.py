@@ -1,3 +1,4 @@
+import json
 import os
 
 import cv2
@@ -45,45 +46,44 @@ class AugmentedInstanceDataset(Dataset):
     def __init__(self, dataset_dir, crop_size=(256, 128), aug_strength='strong'):
         self.dataset_dir = dataset_dir
         self.crop_size = crop_size
-        
+
         self.aug_pipeline1, self.aug_pipeline2 = build_contrastive_augmentations(
             height=crop_size[0], width=crop_size[1]
         )
-        
 
         self.bbox_list = []
         self.build_index()
-        
+
     def __len__(self):
         return len(self.bbox_list)
-    
+
     def __getitem__(self, idx):
 
         seq_name, frame_id, bbox = self.bbox_list[idx]
         seq_path = os.path.join(self.dataset_dir, "sequences", seq_name)
-        
+
         frame = self.load_frame(seq_path, frame_id)
         x1, y1, x2, y2 = map(int, bbox)
         h, w = frame.shape[:2]
         crop = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
-        
+
         if crop.size == 0:
             crop = np.zeros((self.crop_size[0], self.crop_size[1], 3), dtype=np.uint8)
-        
+
         view1 = self.aug_pipeline1(image=crop)['image']
         view2 = self.aug_pipeline2(image=crop)['image']
-        
+
         return view1, view2
-    
+
     def build_index(self):
         sequences_dir = os.path.join(self.dataset_dir, "sequences")
         annotations_dir = os.path.join(self.dataset_dir, "annotations")
-        
+
         for seq in sorted(os.listdir(sequences_dir)):
             seq_path = os.path.join(sequences_dir, seq)
             if not os.path.isdir(seq_path):
                 continue
-            
+
             anno_file = os.path.join(annotations_dir, seq + ".txt")
             if not os.path.exists(anno_file):
                 continue
@@ -94,21 +94,21 @@ class AugmentedInstanceDataset(Dataset):
                     frame_id = int(parts[0])
                     track_id = int(parts[1])
                     x, y, w, h = int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5])
-                    
+
                     self.bbox_list.append((seq, frame_id, (x, y, x + w, y + h)))
-    
+
     def load_frame(self, seq_path, frame_id):
         img_path = os.path.join(seq_path, f"{frame_id:07d}.jpg")
         img = cv2.imread(img_path)
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
-    def get_batch_loader(self, batch_size=32, num_workers=4):
+
+    def get_batch_loader(self, batch_size=32, num_workers=4, shuffle=True, pin_memory=True):
         return DataLoader(
             self,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=shuffle,
             num_workers=num_workers,
-            pin_memory=True
+            pin_memory=pin_memory,
         )
 
 
@@ -183,86 +183,136 @@ class SelfSupervisedInstanceEmbedder(nn.Module):
         return 0.5 * (loss_a + loss_b)
 
 
+def _save_history(history, history_path):
+    if not history_path:
+        return
+    parent = os.path.dirname(history_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(history_path, "w") as f:
+        json.dump(history, f, indent=2)
+
+
 def train_self_supervised(
     model,
-    dataset,
+    train_loader,
     optimizer,
     steps=1000,
-    batch_size=32,
     device="cuda",
+    scheduler=None,
+    mot_eval_fn=None,
+    mot_eval_every=0,
+    history_path=None,
+    log_every=10,
+    desc="ssl training",
+    mode=None,
 ):
+    """
+    Train the SSL embedder. Logs a running loss and optional periodic MOT
+    metrics into a history dict that the visualizer consumes.
+
+    The same function is used for both pretraining (mode=train, loader over
+    data.train.root) and finetuning (mode=test, loader over data.val.root) —
+    the loss curve is always labeled against the loader that drove it.
+
+    mot_eval_fn: optional callable `(step: int) -> dict` returning MOT metrics
+      for the current model state (expensive — keep mot_eval_every large).
+    """
+    history = {
+        "mode": mode,
+        "loss": {"steps": [], "values": []},
+        "mot":  {"steps": [], "metrics": []},
+    }
+
     model.train()
-    dataloader = dataset.get_batch_loader(batch_size=batch_size, num_workers=0)
-    
-    pbar = tqdm(total=steps, desc="self-supervised training")
+    pbar = tqdm(total=steps, desc=desc)
     step = 0
-    
+    running = []
+
     while step < steps:
-        for view1, view2 in dataloader:
+        for v1, v2 in train_loader:
             if step >= steps:
                 break
-            
-            view1 = view1.to(device)
-            view2 = view2.to(device)
-            
+
+            v1 = v1.to(device, non_blocking=True)
+            v2 = v2.to(device, non_blocking=True)
+
             optimizer.zero_grad()
-            loss = model(view1, view2)
+            loss = model(v1, v2)
             loss.backward()
             optimizer.step()
-            
-            pbar.update(1)
-            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+            if scheduler is not None:
+                scheduler.step()
+
+            running.append(loss.item())
             step += 1
-    
+            pbar.update(1)
+            pbar.set_postfix({
+                "loss": f"{loss.item():.4f}",
+                "lr": f"{optimizer.param_groups[0]['lr']:.2e}",
+            })
+
+            if step % log_every == 0:
+                history["loss"]["steps"].append(step)
+                history["loss"]["values"].append(float(np.mean(running)))
+                running = []
+                _save_history(history, history_path)
+
+            if mot_eval_fn is not None and mot_eval_every and step % mot_eval_every == 0:
+                metrics = mot_eval_fn(step)
+                history["mot"]["steps"].append(step)
+                history["mot"]["metrics"].append(metrics)
+                model.train()
+                _save_history(history, history_path)
+
     pbar.close()
+    _save_history(history, history_path)
+    return history
 
 
 if __name__ == "__main__":
-    ## tests in Bohdan, ask if needed
 
     device = torch.device("cuda" if torch.cuda.is_available() else "mps")
-    
 
     dataset = AugmentedInstanceDataset(dataset_dir="VisDrone2019-MOT-train")
     print(f"Dataset size: {len(dataset)} instances")
-    
 
     backbone = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
     model = SelfSupervisedInstanceEmbedder(backbone).to(device)
-    
+
     optimizer = Adam(model.parameters(), lr=1e-3)
-    
+
+    train_loader = dataset.get_batch_loader(batch_size=64, num_workers=0)
     train_self_supervised(
         model=model,
-        dataset=dataset,
+        train_loader=train_loader,
         optimizer=optimizer,
         steps=1000,
-        batch_size=64,
         device=device,
     )
-    
-    checkpoint_path = "triplet_embedding_model.pth"
+
+    checkpoint_path = "ssl_embedding_model.pth"
     torch.save(model.state_dict(), checkpoint_path)
     print(f"Model saved to {checkpoint_path}")
-    
+
     detection_model = YOLO('mshamrai/yolov8n-visdrone')
     detection_model.overrides['conf'] = 0.25
     detection_model.overrides['iou'] = 0.45
     detection_model.overrides['agnostic_nms'] = False
     detection_model.overrides['max_det'] = 1000
-    
+
     track = ROIByteTrack(model=detection_model,
                          reid_model=model,
                          device=device)
-    
+
     mot_metricks_path = "detection_metrics.txt"
-    
+
     track.process_tracking("VisDrone2019-MOT-test-dev/sequences/uav0000009_03358_v",
                            "output_images_tracked",
                            mot_metricks_path,
                            use_roi=True,
                            roi_coef=0.5)
-    
+
     track.evaluate_mot("VisDrone2019-MOT-test-dev/annotations/uav0000009_03358_v.txt",
                        mot_metricks_path,
                        verbose=True)

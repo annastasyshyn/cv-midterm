@@ -1,0 +1,94 @@
+models:
+  detection-model: mshamrai/yolov8n-visdrone
+
+# Two modes:
+#   train — pretrain the SSL embedder on data.train.root → save reid.checkpoint_pretrain
+#   test  — load reid.checkpoint_pretrain, finetune on data.val.root → save reid.checkpoint_finetuned,
+#           then run the final MOT eval on data.test.mot_*
+
+mode: test ## the mode to finetune
+
+data:
+  train:
+    root: /working/cv-midterm/VisDrone2019-MOT-train  # used only in mode=train
+  val:
+    root: /working/cv-midterm/VisDrone2019-MOT-val    # used only in mode=test (finetuning crops)
+  test:
+    # Single sequence — cheap option, also used for periodic MOT eval during finetuning.
+    mot_sequence:    /working/cv-midterm/VisDrone2019-MOT-test-dev/sequences/uav0000009_03358_v
+    mot_annotations: /working/cv-midterm/VisDrone2019-MOT-test-dev/annotations/uav0000009_03358_v.txt
+    # If set, the final MOT eval iterates every sequence under mot_root/sequences/
+    # (paired with annotations at mot_root/annotations/<seq>.txt) and reports
+    # per-sequence + overall metrics via motmetrics.compute_many.
+    # Leave null to fall back to the single sequence above.
+    mot_root: /working/cv-midterm/VisDrone2019-MOT-test-dev
+
+output:
+  images_tracked: /working/cv-midterm/output_images_tracked_ssl
+  metrics_path:   /working/cv-midterm/detection_metrics_ssl.txt
+  history_path:   /working/cv-midterm/ssl_history_${mode}.json
+
+detection:
+  conf: 0.25
+  iou: 0.45
+  agnostic_nms: false
+  max_det: 1000
+  imgsz: 1024
+
+tracking:
+  use_roi: true
+  roi_coef: 0.15
+  track_activation_threshold: 0.25
+  lost_track_buffer: 30
+  minimum_matching_threshold: 0.8
+  frame_rate: 30
+
+reid:
+  type: self_supervised
+  backbone: resnet50
+  weights: IMAGENET1K_V1
+  checkpoint_pretrain:  /working/cv-midterm/ssl_pretrain.pth
+  checkpoint_finetuned: /working/cv-midterm/ssl_finetuned.pth
+  feat_dim: 2048
+  embed_dim: 128
+  temperature: 0.2
+  roi_out: [7, 7]
+  roi_spatial_scale: 0.03125 # 1/32
+
+# hyperparams for mode=train (pretraining on data.train.root)
+training:
+  steps: 5000
+  batch_size: 64
+  crop_size: [256, 128]
+  lr: 0.001
+  num_workers: 4
+  pin_memory: true
+  log_every: 10
+  seed: 69420
+  scheduler:
+    type: cosine       # none | cosine | step
+    warmup_steps: 500  # linear warmup from lr*0.01 → lr (0 disables warmup)
+    eta_min: 0.0       # cosine: lower bound lr
+    step_size: 1000    # step: decay every N steps
+    gamma: 0.1         # step: decay factor
+
+# hyperparams for mode=test (finetuning on data.val.root, then MOT eval on data.test.*)
+testing:
+  steps: 1000             # set to 0 to skip finetuning and evaluate the pretrain checkpoint directly
+  batch_size: 64
+  crop_size: [256, 128]
+  lr: 0.0001              # smaller LR for finetuning
+  freeze_backbone: true   # only the projector is finetuned by default
+  num_workers: 4
+  pin_memory: true
+  log_every: 10
+  mot_eval_every: 0       # 0 = only final MOT eval on test-dev; >0 = periodic during finetuning (expensive)
+  scheduler:
+    type: cosine
+    warmup_steps: 100
+    eta_min: 0.0
+    step_size: 500
+    gamma: 0.1
+
+evaluation:
+  verbose: true

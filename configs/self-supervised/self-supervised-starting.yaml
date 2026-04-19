@@ -95,7 +95,7 @@ training:
 
 # hyperparams for mode=test (finetuning on data.val.root, then MOT eval on data.test.*)
 testing:
-  steps: 100             # set to 0 to skip finetuning and evaluate the pretrain checkpoint directly
+  steps: 500             # set to 0 to skip finetuning and evaluate the pretrain checkpoint directly
   batch_size: 64
   crop_size: [256, 128]
   lr: 0.0001              # smaller LR for finetuning

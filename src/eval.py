@@ -508,6 +508,42 @@ def _ml_pretrain(cfg, device):
     print(f"[ml/train] pretrain checkpoint → {cfg.reid.checkpoint_pretrain}")
 
 
+def _build_heldout_ml_dataset(cfg, max_frame_delta):
+    """
+    Build a TripletDataset over whatever test-dev data is configured, mirroring
+    `_build_heldout_ssl_dataset`:
+      - data.test.mot_root set → all test-dev sequences.
+      - else data.test.mot_sequence set → a single sequence via sequence_filter.
+      - else → None (caller skips val-loss).
+    """
+    from metric import TripletDataset
+
+    mot_root = OmegaConf.select(cfg, "data.test.mot_root")
+    if mot_root:
+        ds = TripletDataset(dataset_dir=mot_root, max_frame_delta=max_frame_delta)
+        print(f"[ml/test] held-out identities (full test-dev): {len(ds)}  (root={mot_root})")
+        return ds
+
+    seq_path = OmegaConf.select(cfg, "data.test.mot_sequence")
+    if not seq_path:
+        print("[ml/test] no data.test.mot_root or mot_sequence — skipping held-out loss")
+        return None
+
+    seq_path = seq_path.rstrip("/")
+    seq_name = os.path.basename(seq_path)
+    seq_root = os.path.dirname(os.path.dirname(seq_path))
+    ds = TripletDataset(
+        dataset_dir=seq_root,
+        max_frame_delta=max_frame_delta,
+        sequence_filter=[seq_name],
+    )
+    print(f"[ml/test] held-out identities (single seq): {len(ds)}  (seq={seq_name})")
+    if len(ds) < 2:
+        print("[ml/test] single seq has <2 identities with ≥2 entries — triplet val loss undefined, skipping")
+        return None
+    return ds
+
+
 def _ml_test(cfg, det_model, device):
     from metric import TripletDataset, train_triplet
 
@@ -540,6 +576,11 @@ def _ml_test(cfg, det_model, device):
             optimizer, OmegaConf.select(cfg, "testing.scheduler"), steps
         )
 
+        val_every = int(OmegaConf.select(cfg, "testing.val_every") or 0)
+        heldout_ds = None
+        if val_every > 0:
+            heldout_ds = _build_heldout_ml_dataset(cfg, max_frame_delta=cfg.testing.max_k)
+
         mot_eval_fn = None
         if int(cfg.testing.mot_eval_every) > 0:
             seq, ann = _resolve_test_paths(cfg)
@@ -559,6 +600,9 @@ def _ml_test(cfg, det_model, device):
             freeze_backbone=False,  # already applied above
             device=device,
             scheduler=scheduler,
+            val_dataset=heldout_ds,
+            val_every=val_every,
+            val_max_batches=OmegaConf.select(cfg, "testing.val_max_batches"),
             mot_eval_fn=mot_eval_fn,
             mot_eval_every=int(cfg.testing.mot_eval_every),
             history_path=cfg.output.history_path,

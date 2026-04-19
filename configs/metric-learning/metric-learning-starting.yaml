@@ -105,6 +105,10 @@ testing:
   pin_memory: true
   log_every: 10
   mot_eval_every: 0       # 0 = only final MOT eval on test-dev; >0 = periodic during finetuning (expensive)
+  val_every: 50           # steps between held-out triplet loss on the test data (0 disables).
+                          # Uses data.test.mot_root if set (all test-dev seqs),
+                          # otherwise falls back to data.test.mot_sequence (single-seq Option B).
+  val_max_batches: 20     # PK batches per val pass (each drawn from the held-out identities)
   # triplet-specific (mirrors training:, typically kept equal or tightened)
   n_ids: 8
   k_per_id: 4

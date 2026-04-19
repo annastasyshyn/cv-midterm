@@ -20,10 +20,15 @@ from roi_bytetrack import ROIByteTrack
 
 class TripletDataset(Dataset):
     def __init__(self, dataset_dir, max_frame_delta=5, transform=None,
-                 crop_size=(256, 128)):
+                 crop_size=(256, 128), sequence_filter=None):
+        """
+        sequence_filter: optional iterable of sequence names — when provided,
+          only those sequences are indexed (supports single-seq val-loss mode).
+        """
         self.dataset_dir = dataset_dir
         self.max_frame_delta = max_frame_delta
         self.crop_size = crop_size
+        self.sequence_filter = set(sequence_filter) if sequence_filter else None
 
         self.crop_transform = transform or T.Compose(
             [
@@ -64,6 +69,8 @@ class TripletDataset(Dataset):
         annotations_dir = os.path.join(self.dataset_dir, "annotations")
 
         for seq in sorted(os.listdir(sequences_dir)):
+            if self.sequence_filter is not None and seq not in self.sequence_filter:
+                continue
             seq_path = os.path.join(sequences_dir, seq)
             if not os.path.isdir(seq_path):
                 continue
@@ -247,6 +254,34 @@ def triplet_loss(
     return torch.cat(losses).mean()
 
 
+@torch.no_grad()
+def evaluate_triplet_loss(
+    model, val_dataset, device, n_ids, k_per_id, margin, max_k,
+    hard_negatives=True, max_batches=20,
+):
+    """
+    Average triplet loss on PK-sampled batches from a held-out dataset.
+    Restores the caller's train/eval mode.
+    """
+    was_training = model.training
+    model.eval()
+    losses = []
+    for _ in range(max_batches):
+        try:
+            crops, labels, frame_ids = val_dataset.sample_nk_batch(n_ids, k_per_id, max_k)
+        except (IndexError, ValueError):
+            break
+        crops = crops.to(device)
+        labels = labels.to(device)
+        frame_ids = frame_ids.to(device)
+        emb = model(crops)
+        loss = triplet_loss(emb, labels, frame_ids, margin, max_k, hard_negatives)
+        losses.append(loss.item())
+    if was_training:
+        model.train()
+    return float(np.mean(losses)) if losses else float("nan")
+
+
 def _save_history(history, history_path):
     if not history_path:
         return
@@ -271,6 +306,9 @@ def train_triplet(
     freeze_backbone=False,
     device="cuda",
     scheduler=None,
+    val_dataset=None,
+    val_every=0,
+    val_max_batches=20,
     mot_eval_fn=None,
     mot_eval_every=0,
     history_path=None,
@@ -282,8 +320,10 @@ def train_triplet(
     Triplet training loop with an optional history dict written to `history_path`.
 
     history schema:
-      {"mode": str, "loss": {"steps": [...], "values": [...]},
-       "mot": {"steps": [...], "metrics": [{...}, ...]}}
+      {"mode": str,
+       "loss":     {"steps": [...], "values": [...]},   # triplet loss on `dataset`
+       "val_loss": {"steps": [...], "values": [...]},   # triplet loss on `val_dataset` (held-out test)
+       "mot":      {"steps": [...], "metrics": [{...}, ...]}}
     """
     if freeze_backbone:
         for p in model.backbone.parameters():
@@ -291,8 +331,9 @@ def train_triplet(
 
     history = {
         "mode": mode,
-        "loss": {"steps": [], "values": []},
-        "mot":  {"steps": [], "metrics": []},
+        "loss":     {"steps": [], "values": []},
+        "val_loss": {"steps": [], "values": []},
+        "mot":      {"steps": [], "metrics": []},
     }
 
     model.train()
@@ -331,6 +372,17 @@ def train_triplet(
             history["loss"]["steps"].append(step)
             history["loss"]["values"].append(float(np.mean(running)))
             running = []
+            _save_history(history, history_path)
+
+        if val_dataset is not None and val_every and step % val_every == 0:
+            vl = evaluate_triplet_loss(
+                model, val_dataset, device,
+                n_ids=n_ids, k_per_id=k_per_id, margin=margin, max_k=max_k,
+                hard_negatives=hard_negatives,
+                max_batches=val_max_batches or 20,
+            )
+            history["val_loss"]["steps"].append(step)
+            history["val_loss"]["values"].append(vl)
             _save_history(history, history_path)
 
         if mot_eval_fn is not None and mot_eval_every and step % mot_eval_every == 0:

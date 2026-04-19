@@ -18,16 +18,18 @@ def build_reid_model(cfg: DictConfig, device: torch.device):
         from metric import EmbeddingModel, TripletDataset, train_triplet
 
         roi_out = tuple(cfg.reid.roi_out)
-        model = EmbeddingModel(
-            base=base,
-            num_classes=0,
-            out_dim=cfg.reid.out_dim,
-            roi_out=roi_out,
-            roi_spatial_scale=cfg.reid.roi_spatial_scale,
-        )
-
+        
         if cfg.training.do_train:
             dataset = TripletDataset(dataset_dir=cfg.data.train_dir, max_frame_delta=cfg.training.max_k)
+            n_ids = len(dataset.identity_keys)
+            
+            model = EmbeddingModel(
+                base=base,
+                num_classes=n_ids,
+                out_dim=cfg.reid.out_dim,
+                roi_out=roi_out,
+                roi_spatial_scale=cfg.reid.roi_spatial_scale,
+            )
             optimizer = torch.optim.Adam(model.parameters(), lr=cfg.training.lr)
             model.to(device)
             train_triplet(
@@ -48,6 +50,18 @@ def build_reid_model(cfg: DictConfig, device: torch.device):
         else:
             checkpoint = torch.load(cfg.reid.checkpoint, map_location=device)
             state_dict = checkpoint["model_state"] if isinstance(checkpoint, dict) and "model_state" in checkpoint else checkpoint
+            
+            num_classes = 0
+            if "classifier.weight" in state_dict:
+                num_classes = state_dict["classifier.weight"].shape[0]
+            
+            model = EmbeddingModel(
+                base=base,
+                num_classes=num_classes,
+                out_dim=cfg.reid.out_dim,
+                roi_out=roi_out,
+                roi_spatial_scale=cfg.reid.roi_spatial_scale,
+            )
             model.load_state_dict(state_dict)
 
         model.to(device).eval()

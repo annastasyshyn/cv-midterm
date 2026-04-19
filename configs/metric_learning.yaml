@@ -19,7 +19,7 @@ detection:
 
 tracking:
   use_roi: true
-  roi_coef: 0.25 # weight of embedding distance vs IOU distance (0=pure IOU, 1=pure embedding)
+  roi_coef: 0.15  # reduced from 0.25 to rely more on IoU while embeddings improve
   track_activation_threshold: 0.25
   lost_track_buffer: 30
   minimum_matching_threshold: 0.8
@@ -36,12 +36,12 @@ reid:
 
 training:
   do_train: true  # set false to skip training and load checkpoint directly
-  steps: 1000
+  steps: 5000
   n_ids: 8 # identities per batch
   k_per_id: 4 # samples per identity per batch
   margin: 1.0 # triplet loss base margin
   max_k: 5 # max frame delta for positive pair selection / dynamic margin
-  ce_weight: 0.0 # weight of cross-entropy auxiliary loss (0 = triplet only)
+  ce_weight: 0.5 
   hard_negatives: true # use hardest negative mining
   freeze_backbone: false # freeze ResNet backbone, only train head
   lr: 0.0001

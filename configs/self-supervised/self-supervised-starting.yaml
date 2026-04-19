@@ -37,9 +37,11 @@ data:
     # Periodic MOT eval during finetuning (testing.mot_eval_every > 0) ALWAYS
     # uses the single sequence `mot_sequence` — multi-seq during training is too
     # expensive.
-    mot_sequence:    /workspace/cv-midterm/VisDrone2019-MOT-test-dev/sequences/uav0000009_03358_v
-    mot_annotations: /workspace/cv-midterm/VisDrone2019-MOT-test-dev/annotations/uav0000009_03358_v.txt
-    mot_root:        null # /workspace/cv-midterm/VisDrone2019-MOT-test-dev  # null → single-seq mode (Option B)
+    # mot_sequence:    /workspace/cv-midterm/VisDrone2019-MOT-test-dev/sequences/uav0000009_03358_v
+    # mot_annotations: /workspace/cv-midterm/VisDrone2019-MOT-test-dev/annotations/uav0000009_03358_v.txt
+    mot_sequence:  null
+    mot_annotations: null
+    mot_root:        /workspace/cv-midterm/VisDrone2019-MOT-test-dev  # null → single-seq mode (Option B)
 
 output:
   images_tracked: /workspace/cv-midterm/output_images_tracked_ssl

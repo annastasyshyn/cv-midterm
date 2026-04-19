@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import motmetrics as mm
 import supervision as sv
-from ultralytics import YOLO
 from ultralyticsplus import YOLO
 
 import torch
@@ -84,7 +83,7 @@ class ROIByteTrack:
         return cost_matrix.cpu().numpy()
         
     @staticmethod
-    def update_with_tensors(self, tensors: np.ndarray, embeddings: np.ndarray = None, roi_coef = 0.5) -> list[STrack]:
+    def update_with_tensors(self, tensors: np.ndarray, embeddings: np.ndarray = None, roi_coef = 0.5, ema_coef = 0.4) -> list[STrack]:
 
         self.frame_id += 1
         activated_starcks = []
@@ -155,7 +154,7 @@ class ROIByteTrack:
             track = strack_pool[itracked]
             det = detections[idet]
             if track.state == TrackState.Tracked:
-                track.update(detections[idet], self.frame_id)
+                track.update(detections[idet], self.frame_id, ema_coef)
                 activated_starcks.append(track)
             else:
                 track.re_activate(det, self.frame_id)
@@ -191,7 +190,7 @@ class ROIByteTrack:
             track = r_tracked_stracks[itracked]
             det = detections_second[idet]
             if track.state == TrackState.Tracked:
-                track.update(det, self.frame_id)
+                track.update(det, self.frame_id, ema_coef)
                 activated_starcks.append(track)
             else:
                 track.re_activate(det, self.frame_id)
@@ -212,7 +211,7 @@ class ROIByteTrack:
             dists, thresh=0.7
         )
         for itracked, idet in matches:
-            unconfirmed[itracked].update(detections[idet], self.frame_id)
+            unconfirmed[itracked].update(detections[idet], self.frame_id, ema_coef)
             activated_starcks.append(unconfirmed[itracked])
         for it in u_unconfirmed:
             track = unconfirmed[it]
@@ -278,7 +277,7 @@ class ROIByteTrack:
 
         return embeddings
 
-    def update_with_detections_roi(self, detections: Detections, embeddings = None, roi_coef = 0.5) -> Detections:
+    def update_with_detections_roi(self, detections: Detections, embeddings = None, roi_coef = 0.5, ema_coef = 0.4) -> Detections:
         """
         Took this from supervision library
         """
@@ -291,7 +290,8 @@ class ROIByteTrack:
         tracks = ROIByteTrack.update_with_tensors(self.tracker,
                                                   tensors=tensors,
                                                   embeddings=embeddings,
-                                                  roi_coef = roi_coef)
+                                                  roi_coef = roi_coef,
+                                                  ema_coef = ema_coef)
 
         if len(tracks) > 0:
             detection_bounding_boxes = np.asarray([det[:4] for det in tensors])
@@ -322,7 +322,8 @@ class ROIByteTrack:
                          target_dir, 
                          mot_file_path = "detection_metrics.txt", 
                          use_roi = False, 
-                         roi_coef = 0.5):
+                         roi_coef = 0.5,
+                         ema_coef = 0.4):
 
         image_paths = sorted([
             os.path.join(source_dir, f) for f in os.listdir(source_dir) 
@@ -348,7 +349,7 @@ class ROIByteTrack:
                     
                     embeddings = self.extract_embeddings(frame, boxes)
                     
-                    detections = self.update_with_detections_roi(detections, embeddings, roi_coef)
+                    detections = self.update_with_detections_roi(detections, embeddings, roi_coef, ema_coef=ema_coef)
                 else:
                     detections = self.update_with_detections_roi(detections)
 
@@ -434,15 +435,20 @@ def main():
 
     track = ROIByteTrack(model = model,
                          reid_model=reid_model,
-                         device=device)
+                         device=device
+                         )
     
     mot_metricks_path = "detection_metrics.txt" # path where mot metricks will be stored, maybe will rework this
     
+    roi_coef = 0.25
+    ema_coef = 0.4
+
     track.process_traching("../task1_2/VisDrone2019-MOT-test-dev/sequences/uav0000009_03358_v", # path to dataset image sequence
-                           "output_images_tracked",  #p ath to output tracked objects on the image
+                           "output_images_tracked",  #path to output tracked objects on the image
                            mot_metricks_path,
                            use_roi = True,
-                           roi_coef = 0.25
+                           roi_coef = roi_coef,
+                           ema_coef = ema_coef
                            )
 
     track.evaluate_mot("../task1_2/VisDrone2019-MOT-test-dev/annotations/uav0000009_03358_v.txt", #path to annotations

@@ -106,7 +106,7 @@ class STrack:
         self.frame_id = frame_id
         self.score = new_track.score
 
-    def update(self, new_track: STrack, frame_id: int) -> None:
+    def update(self, new_track: STrack, frame_id: int, alpha: int = None) -> None:
         """
         Update a matched track
         :type new_track: STrack
@@ -127,9 +127,12 @@ class STrack:
             if self.external_track_id == self.external_id_counter.NO_ID:
                 self.external_track_id = self.external_id_counter.new_id()
 
+        if alpha:
+            self.curr_feat = alpha * self.curr_feat + (1 - alpha) * new_track.curr_feat
+        else:
+            self.curr_feat = new_track.curr_featt
+        
         self.score = new_track.score
-
-        self.curr_feat = new_track.curr_feat
 
     @property
     def tlwh(self) -> npt.NDArray[np.float32]:

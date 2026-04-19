@@ -33,7 +33,7 @@ def build_contrastive_augmentations(height: int = 256, width: int = 128):
             A.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1, p=0.8),
             A.ToGray(p=0.2),
             A.GaussianBlur(blur_limit=(3, 7), p=0.5),
-            A.CoarseDropout(max_holes=4, max_height=0.125, max_width=0.125, p=0.3),
+            A.CoarseDropout(num_holes_range=(1, 4), hole_height_range=(0.05, 0.125), hole_width_range=(0.05, 0.125), p=0.3),
             A.Normalize(mean=mean, std=std),
             ToTensorV2(),
         ])
@@ -236,7 +236,7 @@ if __name__ == "__main__":
         model=model,
         dataset=dataset,
         optimizer=optimizer,
-        steps=200,
+        steps=1000,
         batch_size=64,
         device=device,
     )

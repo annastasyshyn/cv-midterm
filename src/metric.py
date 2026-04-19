@@ -1,3 +1,4 @@
+import json
 import os
 import cv2
 import numpy as np
@@ -246,6 +247,16 @@ def triplet_loss(
     return torch.cat(losses).mean()
 
 
+def _save_history(history, history_path):
+    if not history_path:
+        return
+    parent = os.path.dirname(history_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(history_path, "w") as f:
+        json.dump(history, f, indent=2)
+
+
 def train_triplet(
     model,
     dataset,
@@ -259,10 +270,30 @@ def train_triplet(
     hard_negatives=True,
     freeze_backbone=False,
     device="cuda",
+    scheduler=None,
+    mot_eval_fn=None,
+    mot_eval_every=0,
+    history_path=None,
+    log_every=10,
+    desc="reid",
+    mode=None,
 ):
+    """
+    Triplet training loop with an optional history dict written to `history_path`.
+
+    history schema:
+      {"mode": str, "loss": {"steps": [...], "values": [...]},
+       "mot": {"steps": [...], "metrics": [{...}, ...]}}
+    """
     if freeze_backbone:
         for p in model.backbone.parameters():
             p.requires_grad_(False)
+
+    history = {
+        "mode": mode,
+        "loss": {"steps": [], "values": []},
+        "mot":  {"steps": [], "metrics": []},
+    }
 
     model.train()
     ce_fn = (
@@ -271,7 +302,8 @@ def train_triplet(
         else None
     )
 
-    for _ in tqdm(range(steps), desc="reid"):
+    running = []
+    for step in tqdm(range(1, steps + 1), desc=desc):
         crops, labels, frame_ids = dataset.sample_nk_batch(n_ids, k_per_id, max_k)
 
         crops = crops.to(device)
@@ -290,6 +322,26 @@ def train_triplet(
 
         loss.backward()
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
+
+        running.append(loss.item())
+
+        if step % log_every == 0:
+            history["loss"]["steps"].append(step)
+            history["loss"]["values"].append(float(np.mean(running)))
+            running = []
+            _save_history(history, history_path)
+
+        if mot_eval_fn is not None and mot_eval_every and step % mot_eval_every == 0:
+            metrics = mot_eval_fn(step)
+            history["mot"]["steps"].append(step)
+            history["mot"]["metrics"].append(metrics)
+            model.train()
+            _save_history(history, history_path)
+
+    _save_history(history, history_path)
+    return history
 
 
 if __name__ == "__main__":

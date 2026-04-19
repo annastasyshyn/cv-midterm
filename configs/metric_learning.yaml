@@ -1,0 +1,50 @@
+models:
+  detection-model: mshamrai/yolov8n-visdrone
+
+data:
+  dataset: VisDrone2019-MOT-val/sequences/uav0000086_00000_v
+  annotations: VisDrone2019-MOT-val/annotations/uav0000086_00000_v.txt
+  train_dir: VisDrone2019-MOT-val # root dir for TripletDataset
+
+output:
+  images_tracked: output_images_tracked
+  metrics_path: detection_metrics.txt
+
+detection:
+  conf: 0.25
+  iou: 0.45
+  agnostic_nms: false
+  max_det: 1000
+  imgsz: 1024
+
+tracking:
+  use_roi: true
+  roi_coef: 0.15  # reduced from 0.25 to rely more on IoU while embeddings improve
+  track_activation_threshold: 0.25
+  lost_track_buffer: 30
+  minimum_matching_threshold: 0.8
+  frame_rate: 30
+
+reid:
+  type: metric_learning # pretrained or metric_learning
+  backbone: resnet50
+  weights: IMAGENET1K_V1 # backbone init weights before triplet fine-tuning
+  checkpoint: triplet_embedding_model.pth # save/load path for the trained EmbeddingModel
+  out_dim: 128
+  roi_out: [7, 7]
+  roi_spatial_scale: 0.03125 # 1/32
+
+training:
+  do_train: true  # set false to skip training and load checkpoint directly
+  steps: 5000
+  n_ids: 8 # identities per batch
+  k_per_id: 4 # samples per identity per batch
+  margin: 1.0 # triplet loss base margin
+  max_k: 5 # max frame delta for positive pair selection / dynamic margin
+  ce_weight: 0.5 
+  hard_negatives: true # use hardest negative mining
+  freeze_backbone: false # freeze ResNet backbone, only train head
+  lr: 0.0001
+
+evaluation:
+  verbose: true

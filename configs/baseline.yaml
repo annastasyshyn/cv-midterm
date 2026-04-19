@@ -1,0 +1,37 @@
+models:
+  detection-model: mshamrai/yolov8n-visdrone
+
+data:
+  dataset: VisDrone2019-MOT-val/sequences/uav0000086_00000_v
+  annotations: VisDrone2019-MOT-val/annotations/uav0000086_00000_v.txt
+
+output:
+  images_tracked: output_images_tracked
+  metrics_path: detection_metrics.txt
+
+detection:
+  conf: 0.25
+  iou: 0.45
+  agnostic_nms: false
+  max_det: 1000
+  imgsz: 1024
+
+tracking:
+  use_roi: false
+  roi_coef: 0.25
+  track_activation_threshold: 0.25
+  lost_track_buffer: 30
+  minimum_matching_threshold: 0.8
+  frame_rate: 30
+
+reid:
+  type: pretrained           # pretrained | metric_learning
+  backbone: resnet50
+  weights: IMAGENET1K_V1
+  checkpoint: null           # unused for pretrained
+  out_dim: 128
+  roi_out: [7, 7]
+  roi_spatial_scale: 0.03125 # 1/32
+
+evaluation:
+  verbose: true

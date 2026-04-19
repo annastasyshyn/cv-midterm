@@ -14,7 +14,7 @@ mode: test ## the mode to finetune
 
 data:
   train:
-    root: /workspace/cv-midterm/VisDrone2019-MOT-train  # used only in mode=train
+    root: /workspace/cv-midterm/VisDrone2019-MOT-val  # used only in mode=train
   val:
     root: /workspace/cv-midterm/VisDrone2019-MOT-val    # used only in mode=test (finetuning crops)
   test:
@@ -97,7 +97,7 @@ training:
 
 # hyperparams for mode=test (finetuning on data.val.root, then MOT eval on data.test.*)
 testing:
-  steps: 1000             # set to 0 to skip finetuning and evaluate the pretrain checkpoint directly
+  steps: 500             # set to 0 to skip finetuning and evaluate the pretrain checkpoint directly
   batch_size: 64
   lr: 0.00001             # smaller LR for finetuning
   freeze_backbone: true   # only the head is finetuned by default

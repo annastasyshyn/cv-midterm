@@ -183,6 +183,28 @@ class SelfSupervisedInstanceEmbedder(nn.Module):
         return 0.5 * (loss_a + loss_b)
 
 
+@torch.no_grad()
+def evaluate_ssl_loss(model, val_loader, device, max_batches=None):
+    """
+    Average InfoNCE loss on a held-out loader. Restores the caller's train/eval mode.
+    Used in mode=test to track a validation signal on the test-dev crops
+    while finetuning on data.val.root.
+    """
+    was_training = model.training
+    model.eval()
+    losses = []
+    for bi, (v1, v2) in enumerate(val_loader):
+        if max_batches is not None and bi >= max_batches:
+            break
+        v1 = v1.to(device, non_blocking=True)
+        v2 = v2.to(device, non_blocking=True)
+        loss = model(v1, v2)
+        losses.append(loss.item())
+    if was_training:
+        model.train()
+    return float(np.mean(losses)) if losses else float("nan")
+
+
 def _save_history(history, history_path):
     if not history_path:
         return
@@ -200,6 +222,9 @@ def train_self_supervised(
     steps=1000,
     device="cuda",
     scheduler=None,
+    val_loader=None,
+    val_every=0,
+    val_max_batches=None,
     mot_eval_fn=None,
     mot_eval_every=0,
     history_path=None,
@@ -220,8 +245,9 @@ def train_self_supervised(
     """
     history = {
         "mode": mode,
-        "loss": {"steps": [], "values": []},
-        "mot":  {"steps": [], "metrics": []},
+        "loss":     {"steps": [], "values": []},
+        "val_loss": {"steps": [], "values": []},
+        "mot":      {"steps": [], "metrics": []},
     }
 
     model.train()
@@ -256,6 +282,12 @@ def train_self_supervised(
                 history["loss"]["steps"].append(step)
                 history["loss"]["values"].append(float(np.mean(running)))
                 running = []
+                _save_history(history, history_path)
+
+            if val_loader is not None and val_every and step % val_every == 0:
+                vl = evaluate_ssl_loss(model, val_loader, device, val_max_batches)
+                history["val_loss"]["steps"].append(step)
+                history["val_loss"]["values"].append(vl)
                 _save_history(history, history_path)
 
             if mot_eval_fn is not None and mot_eval_every and step % mot_eval_every == 0:

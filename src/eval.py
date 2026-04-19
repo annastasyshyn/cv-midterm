@@ -109,8 +109,9 @@ def _run_final_mot(cfg: DictConfig, det_model, reid_model, device):
         _run_final_mot_multi(cfg, det_model, reid_model, device, mot_root)
         return
 
+    save_images = bool(OmegaConf.select(cfg, "output.save_images"))
     test_sequence, test_annotations = _resolve_test_paths(cfg)
-    print(f"[main] test MOT seq (single): {test_sequence}")
+    print(f"[main] test MOT seq (single): {test_sequence}  save_images={save_images}")
 
     reid_model.eval()
     tracker = ROIByteTrack(model=det_model, reid_model=reid_model, device=device)
@@ -120,6 +121,7 @@ def _run_final_mot(cfg: DictConfig, det_model, reid_model, device):
         cfg.output.metrics_path,
         use_roi=cfg.tracking.use_roi,
         roi_coef=cfg.tracking.roi_coef,
+        save_images=save_images,
     )
     tracker.evaluate_mot(
         test_annotations,
@@ -172,9 +174,11 @@ def _run_final_mot_multi(cfg, det_model, reid_model, device, mot_root):
     if not os.path.isdir(sequences_dir):
         raise FileNotFoundError(f"sequences dir not found: {sequences_dir}")
 
+    save_images = bool(OmegaConf.select(cfg, "output.save_images"))
     images_root = cfg.output.images_tracked
     metrics_prefix = cfg.output.metrics_path  # we'll append ".<seq>.txt"
-    os.makedirs(images_root, exist_ok=True)
+    if save_images:
+        os.makedirs(images_root, exist_ok=True)
 
     reid_model.eval()
     tracker = ROIByteTrack(model=det_model, reid_model=reid_model, device=device)
@@ -184,7 +188,7 @@ def _run_final_mot_multi(cfg, det_model, reid_model, device, mot_root):
 
     seqs = sorted(s for s in os.listdir(sequences_dir)
                   if os.path.isdir(os.path.join(sequences_dir, s)))
-    print(f"[main] test MOT root: {mot_root} ({len(seqs)} sequences)")
+    print(f"[main] test MOT root: {mot_root} ({len(seqs)} sequences)  save_images={save_images}")
 
     for seq_name in seqs:
         seq_path = os.path.join(sequences_dir, seq_name)
@@ -203,6 +207,7 @@ def _run_final_mot_multi(cfg, det_model, reid_model, device, mot_root):
             out_metrics,
             use_roi=cfg.tracking.use_roi,
             roi_coef=cfg.tracking.roi_coef,
+            save_images=save_images,
         )
         accs.append(_build_mot_accumulator(ann_file, out_metrics))
         names.append(seq_name)
@@ -248,6 +253,7 @@ def _make_mot_eval_fn(cfg, det_model, reid_model, device, sequence, annotations)
             ckpt_metrics_path,
             use_roi=cfg.tracking.use_roi,
             roi_coef=cfg.tracking.roi_coef,
+            save_images=False,  # always skip for periodic eval — disk-prohibitive otherwise
         )
         summary = tracker.evaluate_mot(annotations, ckpt_metrics_path, verbose=False)
         if was_training:
@@ -353,7 +359,7 @@ def _ssl_test(cfg, det_model, device):
         val_ds = AugmentedInstanceDataset(dataset_dir=val_root, crop_size=crop_size)
         print(f"[ssl/test] finetune crops: {len(val_ds)}  (root={val_root})")
 
-        val_loader = DataLoader(
+        finetune_loader = DataLoader(
             val_ds,
             batch_size=cfg.testing.batch_size,
             shuffle=True,
@@ -361,6 +367,28 @@ def _ssl_test(cfg, det_model, device):
             pin_memory=cfg.testing.pin_memory,
             drop_last=True,
         )
+
+        # Held-out validation loss on test-dev crops (requires data.test.mot_root).
+        # Reports the InfoNCE signal on data the model has never seen while
+        # finetuning on data.val.root — a sanity check that finetuning isn't
+        # just overfitting to val.
+        heldout_loader = None
+        val_every = int(OmegaConf.select(cfg, "testing.val_every") or 0)
+        if val_every > 0:
+            test_root = OmegaConf.select(cfg, "data.test.mot_root")
+            if test_root:
+                heldout_ds = AugmentedInstanceDataset(dataset_dir=test_root, crop_size=crop_size)
+                print(f"[ssl/test] val-loss crops (test-dev): {len(heldout_ds)}  (root={test_root})")
+                heldout_loader = DataLoader(
+                    heldout_ds,
+                    batch_size=cfg.testing.batch_size,
+                    shuffle=False,
+                    num_workers=cfg.testing.num_workers,
+                    pin_memory=cfg.testing.pin_memory,
+                    drop_last=True,
+                )
+            else:
+                print("[ssl/test] val_every>0 but data.test.mot_root is null — skipping val loss")
 
         optimizer = torch.optim.Adam(trainable, lr=cfg.testing.lr)
         scheduler = _build_scheduler(
@@ -374,11 +402,14 @@ def _ssl_test(cfg, det_model, device):
 
         train_self_supervised(
             model=model,
-            train_loader=val_loader,
+            train_loader=finetune_loader,
             optimizer=optimizer,
             steps=steps,
             device=device,
             scheduler=scheduler,
+            val_loader=heldout_loader,
+            val_every=val_every,
+            val_max_batches=OmegaConf.select(cfg, "testing.val_max_batches"),
             mot_eval_fn=mot_eval_fn,
             mot_eval_every=int(cfg.testing.mot_eval_every),
             history_path=cfg.output.history_path,

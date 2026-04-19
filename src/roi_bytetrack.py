@@ -343,19 +343,20 @@ class ROIByteTrack:
             return detections
 
 
-    def process_tracking(self, 
-                         source_dir, 
-                         target_dir, 
-                         mot_file_path = "detection_metrics.txt", 
-                         use_roi = False, 
-                         roi_coef = 0.5):
+    def process_tracking(self,
+                         source_dir,
+                         target_dir,
+                         mot_file_path = "detection_metrics.txt",
+                         use_roi = False,
+                         roi_coef = 0.5,
+                         save_images = True):
 
         image_paths = sorted([
-            os.path.join(source_dir, f) for f in os.listdir(source_dir) 
+            os.path.join(source_dir, f) for f in os.listdir(source_dir)
             if f.lower().endswith(('.png', '.jpg', '.jpeg'))
         ])
 
-        if not os.path.exists(target_dir):
+        if save_images and not os.path.exists(target_dir):
             os.makedirs(target_dir)
 
         with open(mot_file_path, "w", encoding="utf-8") as mot_file:
@@ -390,11 +391,11 @@ class ROIByteTrack:
                         line = f"{frame_idx+1},{track_id},{x1:.2f},{y1:.2f},{w:.2f},{h:.2f},{conf:.4f},-1,-1,-1\n"
                         mot_file.write(line)
 
-                if detections.tracker_id is not None:
+                if save_images and detections.tracker_id is not None:
                     labels = [f"#{tid}" for tid in detections.tracker_id]
                     annotated_frame = self.box_annotator.annotate(frame.copy(), detections=detections)
                     annotated_frame = self.label_annotator.annotate(annotated_frame, detections=detections, labels=labels)
-                    
+
                     output_path = os.path.join(target_dir, os.path.basename(img_path))
                     cv2.imwrite(output_path, annotated_frame)
 

@@ -43,6 +43,8 @@ output:
   images_tracked: /workspace/cv-midterm/output_images_tracked_ml
   metrics_path:   /workspace/cv-midterm/detection_metrics_ml.txt
   history_path:   /workspace/cv-midterm/ml_history_${mode}.json
+  save_images:    false   # true → annotate each frame with tracked bboxes + IDs.
+                          # false → skip (recommended for the full test-dev sweep).
 
 detection:
   conf: 0.25

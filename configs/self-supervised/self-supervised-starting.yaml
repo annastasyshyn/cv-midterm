@@ -45,6 +45,9 @@ output:
   images_tracked: /workspace/cv-midterm/output_images_tracked_ssl
   metrics_path:   /workspace/cv-midterm/detection_metrics_ssl.txt
   history_path:   /workspace/cv-midterm/ssl_history_${mode}.json
+  save_images:    false   # true → annotate each frame with tracked bboxes + IDs and write to images_tracked/
+                          # false → skip (recommended for the full test-dev sweep; tens of GB otherwise).
+                          # Periodic mid-training MOT eval always skips regardless of this flag.
 
 detection:
   conf: 0.25
@@ -101,6 +104,8 @@ testing:
   pin_memory: true
   log_every: 10
   mot_eval_every: 0       # 0 = only final MOT eval on test-dev; >0 = periodic during finetuning (expensive)
+  val_every: 50           # steps between held-out InfoNCE loss on data.test.mot_root (0 disables)
+  val_max_batches: 20     # cap batches per val pass (null = full test-dev crop set, can be huge)
   scheduler:
     type: cosine
     warmup_steps: 100

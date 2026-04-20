@@ -118,6 +118,7 @@ def _run_final_mot(cfg: DictConfig, det_model, reid_model, device):
     test_sequence, test_annotations = _resolve_test_paths(cfg)
     print(f"[main] test MOT seq (single): {test_sequence}  save_images={save_images}")
 
+    os.makedirs(os.path.dirname(cfg.output.metrics_path) or ".", exist_ok=True)
     reid_model.eval()
     tracker = ROIByteTrack(model=det_model, reid_model=reid_model, device=device)
     tracker.process_tracking(
@@ -182,6 +183,7 @@ def _run_final_mot_multi(cfg, det_model, reid_model, device, mot_root):
     save_images = bool(OmegaConf.select(cfg, "output.save_images"))
     images_root = cfg.output.images_tracked
     metrics_prefix = cfg.output.metrics_path  # we'll append ".<seq>.txt"
+    os.makedirs(os.path.dirname(metrics_prefix) or ".", exist_ok=True)
     if save_images:
         os.makedirs(images_root, exist_ok=True)
 
@@ -538,6 +540,7 @@ def _ssl_test(cfg, det_model, device):
             mode="test",
         )
 
+        os.makedirs(os.path.dirname(cfg.reid.checkpoint_finetuned) or ".", exist_ok=True)
         torch.save(model.state_dict(), cfg.reid.checkpoint_finetuned)
         print(f"[ssl/test] finetuned checkpoint → {cfg.reid.checkpoint_finetuned}")
     else:
@@ -699,6 +702,7 @@ def _ml_test(cfg, det_model, device):
             mode="test",
         )
 
+        os.makedirs(os.path.dirname(cfg.reid.checkpoint_finetuned) or ".", exist_ok=True)
         torch.save(model.state_dict(), cfg.reid.checkpoint_finetuned)
         print(f"[ml/test] finetuned checkpoint → {cfg.reid.checkpoint_finetuned}")
     else:

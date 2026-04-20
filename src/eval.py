@@ -327,10 +327,23 @@ def _build_ssl_backbone_model(cfg, device, raw_backbone_state=None):
         raise ValueError(f"Unsupported backbone_type={backbone_type!r}")
 
     if raw_backbone_state is not None:
-        missing, unexpected = base.load_state_dict(raw_backbone_state, strict=False)
+        # Drop classifier-head keys: supervised-pretrain checkpoints carry an
+        # n_classes-specific head (e.g. VisDrone → fc.weight is [10, 2048]),
+        # which shape-mismatches the ImageNet head [1000, 2048]. We never use
+        # the classifier — the embedder taps features before it — so strip
+        # the keys instead of resizing.
+        head_keys = {
+            "resnet50": ("fc.weight", "fc.bias"),
+            "swin_t":   ("head.weight", "head.bias"),
+        }[backbone_type]
+        filtered_state = {k: v for k, v in raw_backbone_state.items() if k not in head_keys}
+        dropped = [k for k in head_keys if k in raw_backbone_state]
+
+        missing, unexpected = base.load_state_dict(filtered_state, strict=False)
         print(
             f"[ssl] loaded raw {backbone_type} weights "
-            f"(missing={len(missing)}, unexpected={len(unexpected)})"
+            f"(missing={len(missing)}, unexpected={len(unexpected)}, "
+            f"dropped_head={dropped})"
         )
 
     print(f"[ssl] backbone={backbone_type} (inferred from {cfg.reid.checkpoint_pretrain})")

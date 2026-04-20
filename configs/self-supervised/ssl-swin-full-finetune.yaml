@@ -75,7 +75,7 @@ training:
     gamma: 0.1
 
 testing:
-  steps: 50
+  steps: 5000
   batch_size: 64
   crop_size: [256, 128]
   lr: 0.00002              # <-- even smaller than A2; transformers are picky

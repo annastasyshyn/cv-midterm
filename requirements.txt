@@ -11,3 +11,4 @@ hydra-core
 omegaconf
 albumentations
 numpy<2 ## yes I know it, don't touch that
+setuptools<81

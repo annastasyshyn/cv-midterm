@@ -18,11 +18,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/src"
 
 ALL_CONFIGS=(
-    ssl-r50-eval-only
+    # ssl-r50-eval-only
     ssl-r50-projector-only
-    # ssl-r50-full-finetune
-    # ssl-r50-temp-low
-    # ssl-swin-projector-only
+    ssl-r50-full-finetune
+    ssl-r50-temp-low
+    ssl-swin-projector-only
     ssl-swin-full-finetune
 )
 

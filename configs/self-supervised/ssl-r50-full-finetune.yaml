@@ -73,12 +73,12 @@ training:
     gamma: 0.1
 
 testing:
-  steps: 50
+  steps: 5000
   batch_size: 64
   crop_size: [256, 128]
   lr: 0.00005              # <-- 2x smaller than A1 (everything trains)
   freeze_backbone: false   # <-- ablation axis
-  num_workers: 4
+  num_workers: 6
   pin_memory: true
   log_every: 10
   mot_eval_every: 0

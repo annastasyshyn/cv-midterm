@@ -296,7 +296,26 @@ def _detect_backbone_from_path(path: str) -> str:
     )
 
 
-def _build_ssl_backbone_model(cfg, device):
+def _is_ssl_embedder_state(state: dict) -> bool:
+    """
+    True when `state` looks like a saved `SelfSupervisedInstanceEmbedder`
+    (has the `backbone.` / `projector.` prefixes our wrapping introduces).
+    False when it looks like a bare torchvision backbone state_dict
+    (e.g. `conv1.weight` / `layer1.*` for ResNet, `features.*` / `norm.*`
+    / `head.*` for Swin-T) — i.e. a classifier pretrained directly on the
+    raw architecture, with no SSL projector baked in.
+    """
+    return any(k.startswith("backbone.") or k.startswith("projector.") for k in state.keys())
+
+
+def _build_ssl_backbone_model(cfg, device, raw_backbone_state=None):
+    """
+    Build the SSL embedder. When `raw_backbone_state` is provided (a bare
+    torchvision backbone state_dict), it is loaded into the base model
+    BEFORE the embedder wraps it — so the wrapped `backbone` sub-module
+    inherits the pretrained weights while the `projector` stays randomly
+    initialised and is later learned during finetuning.
+    """
     from self_supervised import SelfSupervisedInstanceEmbedder
 
     backbone_type = _detect_backbone_from_path(cfg.reid.checkpoint_pretrain)
@@ -306,6 +325,13 @@ def _build_ssl_backbone_model(cfg, device):
         base = swin_t(weights=Swin_T_Weights.IMAGENET1K_V1)
     else:
         raise ValueError(f"Unsupported backbone_type={backbone_type!r}")
+
+    if raw_backbone_state is not None:
+        missing, unexpected = base.load_state_dict(raw_backbone_state, strict=False)
+        print(
+            f"[ssl] loaded raw {backbone_type} weights "
+            f"(missing={len(missing)}, unexpected={len(unexpected)})"
+        )
 
     print(f"[ssl] backbone={backbone_type} (inferred from {cfg.reid.checkpoint_pretrain})")
     return SelfSupervisedInstanceEmbedder(
@@ -407,10 +433,26 @@ def _ssl_test(cfg, det_model, device):
     if not val_root:
         raise ValueError("mode=test requires `data.val.root`.")
 
-    model = _build_ssl_backbone_model(cfg, device)
     state = _load_state_dict(cfg.reid.checkpoint_pretrain, device)
-    model.load_state_dict(state)
-    print(f"[ssl/test] loaded pretrain: {cfg.reid.checkpoint_pretrain}")
+    if _is_ssl_embedder_state(state):
+        # Full SSL embedder checkpoint (backbone + projector, produced by
+        # a prior mode=train run). Build an empty embedder and load all of it.
+        model = _build_ssl_backbone_model(cfg, device)
+        model.load_state_dict(state)
+        print(f"[ssl/test] loaded SSL embedder: {cfg.reid.checkpoint_pretrain}")
+    else:
+        # Bare torchvision backbone checkpoint (supervised pretrain on
+        # VisDrone, no SSL projector baked in). Load it into the base
+        # before wrapping; projector stays random-init and must be trained
+        # during finetune — so testing.steps=0 with this flavor yields
+        # random-projection embeddings.
+        model = _build_ssl_backbone_model(cfg, device, raw_backbone_state=state)
+        print(f"[ssl/test] loaded raw backbone: {cfg.reid.checkpoint_pretrain} "
+              "(projector random-init, will be trained during finetune)")
+        if int(cfg.testing.steps) == 0:
+            print("[ssl/test] WARNING: raw backbone + testing.steps=0 → "
+                  "embeddings are a random projection of backbone features; "
+                  "MOT metrics will be essentially random.")
 
     steps = int(cfg.testing.steps)
     if steps > 0:

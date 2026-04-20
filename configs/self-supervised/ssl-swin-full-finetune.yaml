@@ -1,0 +1,97 @@
+# @package _global_
+# Ablation B2 — Swin-T, full finetune (backbone unfrozen).
+# Pairs with A2 (ResNet50 full finetune) and B1 (Swin-T frozen).
+#
+# Transformers are more sensitive to LR than CNNs during finetuning — 5e-5
+# from A2 is already conservative, we drop to 2e-5 to avoid blowing up the
+# attention weights. If loss diverges, the first knob to turn is
+# testing.scheduler.warmup_steps upward.
+#
+# Same code-change caveat as B1: needs a swin-t dispatch in
+# _build_ssl_backbone_model / SelfSupervisedInstanceEmbedder.
+
+models:
+  detection-model: mshamrai/yolov8n-visdrone
+
+mode: test
+
+data:
+  train:
+    root: /workspace/cv-midterm/VisDrone2019-MOT-val
+  val:
+    root: /workspace/cv-midterm/VisDrone2019-MOT-val
+  test:
+    mot_sequence:    null
+    mot_annotations: null
+    mot_root:        /workspace/cv-midterm/VisDrone2019-MOT-test-dev
+
+output:
+  images_tracked: /workspace/cv-midterm/out/ssl_swin_full/images
+  metrics_path:   /workspace/cv-midterm/out/ssl_swin_full/metrics.txt
+  history_path:   /workspace/cv-midterm/out/ssl_swin_full/history_${mode}.json
+  save_images:    false
+
+detection:
+  conf: 0.25
+  iou: 0.45
+  agnostic_nms: false
+  max_det: 1000
+  imgsz: 1024
+
+tracking:
+  use_roi: true
+  roi_coef: 0.15
+  track_activation_threshold: 0.25
+  lost_track_buffer: 30
+  minimum_matching_threshold: 0.8
+  frame_rate: 30
+
+reid:
+  type: self_supervised
+  backbone: swin_t
+  weights: IMAGENET1K_V1
+  checkpoint_pretrain:  /workspace/cv-midterm/swin_t_visdrone_best.pth
+  checkpoint_finetuned: /workspace/cv-midterm/out/ssl_swin_full/finetuned.pth
+  feat_dim: 768
+  embed_dim: 128
+  temperature: 0.2
+  roi_out: [7, 7]
+  roi_spatial_scale: 0.03125
+
+training:
+  steps: 5000
+  batch_size: 64
+  crop_size: [256, 128]
+  lr: 0.001
+  num_workers: 4
+  pin_memory: true
+  log_every: 10
+  seed: 69420
+  scheduler:
+    type: cosine
+    warmup_steps: 500
+    eta_min: 0.0
+    step_size: 1000
+    gamma: 0.1
+
+testing:
+  steps: 500
+  batch_size: 64
+  crop_size: [256, 128]
+  lr: 0.00002              # <-- even smaller than A2; transformers are picky
+  freeze_backbone: false
+  num_workers: 4
+  pin_memory: true
+  log_every: 10
+  mot_eval_every: 0
+  val_every: 50
+  val_max_batches: 20
+  scheduler:
+    type: cosine
+    warmup_steps: 200      # <-- 2x A2: extra warmup for attention stability
+    eta_min: 0.0
+    step_size: 500
+    gamma: 0.1
+
+evaluation:
+  verbose: true

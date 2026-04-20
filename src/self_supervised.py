@@ -122,6 +122,27 @@ class AugmentedInstanceDataset(Dataset):
         )
 
 
+class _SwinFeatureExtractor(nn.Module):
+    """
+    Trim torchvision's `swin_t` down to the pre-head global feature vector.
+    `features` outputs (N, H, W, C); `norm` acts on the channel dim; we then
+    permute to NCHW so AdaptiveAvgPool2d + flatten can reuse the same
+    `encode()` code path as the ResNet branch.
+    """
+
+    def __init__(self, backbone: nn.Module) -> None:
+        super().__init__()
+        self.features = backbone.features
+        self.norm = backbone.norm
+        self.avgpool = backbone.avgpool
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.norm(x)
+        x = x.permute(0, 3, 1, 2)
+        return self.avgpool(x)
+
+
 class SelfSupervisedInstanceEmbedder(nn.Module):
     """
     MASA-style instance embedder trained with InfoNCE contrastive loss.
@@ -141,22 +162,31 @@ class SelfSupervisedInstanceEmbedder(nn.Module):
     def __init__(
         self,
         backbone: nn.Module,
+        backbone_type: str = "resnet50",
         feat_dim: int = 2048,
         embed_dim: int = 128,
         temperature: float = 0.2,
     ) -> None:
         super().__init__()
-        self.backbone = nn.Sequential(
-            backbone.conv1,
-            backbone.bn1,
-            backbone.relu,
-            backbone.maxpool,
-            backbone.layer1,
-            backbone.layer2,
-            backbone.layer3,
-            backbone.layer4,
-            nn.AdaptiveAvgPool2d((1, 1)),
-        )
+        if backbone_type == "resnet50":
+            self.backbone = nn.Sequential(
+                backbone.conv1,
+                backbone.bn1,
+                backbone.relu,
+                backbone.maxpool,
+                backbone.layer1,
+                backbone.layer2,
+                backbone.layer3,
+                backbone.layer4,
+                nn.AdaptiveAvgPool2d((1, 1)),
+            )
+        elif backbone_type == "swin_t":
+            self.backbone = _SwinFeatureExtractor(backbone)
+        else:
+            raise ValueError(
+                f"Unsupported backbone_type={backbone_type!r}. "
+                "Expected 'resnet50' or 'swin_t'."
+            )
         self.projector = nn.Sequential(
             nn.Linear(feat_dim, feat_dim),
             nn.BatchNorm1d(feat_dim),

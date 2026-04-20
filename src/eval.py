@@ -12,7 +12,12 @@ from torch.optim.lr_scheduler import (
     StepLR,
 )
 from torch.utils.data import DataLoader
-from torchvision.models import resnet50, ResNet50_Weights
+from torchvision.models import (
+    ResNet50_Weights,
+    Swin_T_Weights,
+    resnet50,
+    swin_t,
+)
 from ultralyticsplus import YOLO
 
 from roi_bytetrack import ROIByteTrack
@@ -272,12 +277,40 @@ def _make_mot_eval_fn(cfg, det_model, reid_model, device, sequence, annotations)
 
 # ---------- self-supervised flows -------------------------------------------
 
+def _detect_backbone_from_path(path: str) -> str:
+    """
+    Infer the backbone architecture from the checkpoint filename.
+
+    The dispatch is filename-driven (not cfg.reid.backbone) so a stray config
+    like `backbone: resnet50` paired with `ssl_pretrain_swin_t.pth` fails
+    loudly at build time rather than at state_dict load.
+    """
+    name = os.path.basename(str(path)).lower()
+    if "resnet50" in name:
+        return "resnet50"
+    if "swin_t" in name:
+        return "swin_t"
+    raise ValueError(
+        f"Cannot infer backbone from checkpoint path {path!r}: "
+        "filename must contain 'resnet50' or 'swin_t'."
+    )
+
+
 def _build_ssl_backbone_model(cfg, device):
     from self_supervised import SelfSupervisedInstanceEmbedder
 
-    backbone = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
+    backbone_type = _detect_backbone_from_path(cfg.reid.checkpoint_pretrain)
+    if backbone_type == "resnet50":
+        base = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
+    elif backbone_type == "swin_t":
+        base = swin_t(weights=Swin_T_Weights.IMAGENET1K_V1)
+    else:
+        raise ValueError(f"Unsupported backbone_type={backbone_type!r}")
+
+    print(f"[ssl] backbone={backbone_type} (inferred from {cfg.reid.checkpoint_pretrain})")
     return SelfSupervisedInstanceEmbedder(
-        backbone=backbone,
+        backbone=base,
+        backbone_type=backbone_type,
         feat_dim=cfg.reid.feat_dim,
         embed_dim=cfg.reid.embed_dim,
         temperature=cfg.reid.temperature,

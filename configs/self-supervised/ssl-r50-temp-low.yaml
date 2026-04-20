@@ -1,0 +1,96 @@
+# @package _global_
+# Ablation A3 — ResNet50, projector-only, tight InfoNCE temperature (0.07).
+#
+# Hypothesis: with τ=0.2 the InfoNCE logits are soft and the loss rewards
+# coarse separation; with τ=0.07 (the SimCLR / MoCo default) the loss pushes
+# much harder on hard negatives, which matters when negatives are other
+# drone-view objects of the same class. The "right" τ for MOT re-id on
+# small, low-resolution crops is not obvious — sweep it.
+#
+# Deviation from A1: reid.temperature 0.2 → 0.07.
+
+models:
+  detection-model: mshamrai/yolov8n-visdrone
+
+mode: test
+
+data:
+  train:
+    root: /workspace/cv-midterm/VisDrone2019-MOT-val
+  val:
+    root: /workspace/cv-midterm/VisDrone2019-MOT-val
+  test:
+    mot_sequence:    null
+    mot_annotations: null
+    mot_root:        /workspace/cv-midterm/VisDrone2019-MOT-test-dev
+
+output:
+  images_tracked: /workspace/cv-midterm/out/ssl_r50_temp007/images
+  metrics_path:   /workspace/cv-midterm/out/ssl_r50_temp007/metrics.txt
+  history_path:   /workspace/cv-midterm/out/ssl_r50_temp007/history_${mode}.json
+  save_images:    false
+
+detection:
+  conf: 0.25
+  iou: 0.45
+  agnostic_nms: false
+  max_det: 1000
+  imgsz: 1024
+
+tracking:
+  use_roi: true
+  roi_coef: 0.15
+  track_activation_threshold: 0.25
+  lost_track_buffer: 30
+  minimum_matching_threshold: 0.8
+  frame_rate: 30
+
+reid:
+  type: self_supervised
+  backbone: resnet50
+  weights: IMAGENET1K_V1
+  checkpoint_pretrain:  /workspace/cv-midterm/resnet50_visdrone_best.pth
+  checkpoint_finetuned: /workspace/cv-midterm/out/ssl_r50_temp007/finetuned.pth
+  feat_dim: 2048
+  embed_dim: 128
+  temperature: 0.07        # <-- ablation axis: tight contrastive
+  roi_out: [7, 7]
+  roi_spatial_scale: 0.03125
+
+training:
+  steps: 5000
+  batch_size: 64
+  crop_size: [256, 128]
+  lr: 0.001
+  num_workers: 4
+  pin_memory: true
+  log_every: 10
+  seed: 69420
+  scheduler:
+    type: cosine
+    warmup_steps: 500
+    eta_min: 0.0
+    step_size: 1000
+    gamma: 0.1
+
+testing:
+  steps: 500
+  batch_size: 64
+  crop_size: [256, 128]
+  lr: 0.0001
+  freeze_backbone: true
+  num_workers: 4
+  pin_memory: true
+  log_every: 10
+  mot_eval_every: 0
+  val_every: 50
+  val_max_batches: 20
+  scheduler:
+    type: cosine
+    warmup_steps: 100
+    eta_min: 0.0
+    step_size: 500
+    gamma: 0.1
+
+evaluation:
+  verbose: true

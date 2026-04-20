@@ -1,0 +1,97 @@
+# @package _global_
+# Ablation B1 — Swin-T, frozen backbone, projector-only finetune.
+# Pairs with A1 (ResNet50 same recipe) to isolate the backbone-architecture
+# effect.
+#
+# NOTE: src/eval.py:278 and src/self_supervised.py:149-159 are hardcoded to
+# ResNet50 layer names — running this config requires extending
+# `_build_ssl_backbone_model` and `SelfSupervisedInstanceEmbedder.__init__`
+# to dispatch on cfg.reid.backbone. Torchvision's `swin_t` exposes `.features`
+# (a Sequential of the 4 stages) + `.norm`, not `layer1..layer4`, and its
+# final feature dim is 768 (not 2048).
+
+models:
+  detection-model: mshamrai/yolov8n-visdrone
+
+mode: test
+
+data:
+  train:
+    root: /workspace/cv-midterm/VisDrone2019-MOT-val
+  val:
+    root: /workspace/cv-midterm/VisDrone2019-MOT-val
+  test:
+    mot_sequence:    null
+    mot_annotations: null
+    mot_root:        /workspace/cv-midterm/VisDrone2019-MOT-test-dev
+
+output:
+  images_tracked: /workspace/cv-midterm/out/ssl_swin_projector/images
+  metrics_path:   /workspace/cv-midterm/out/ssl_swin_projector/metrics.txt
+  history_path:   /workspace/cv-midterm/out/ssl_swin_projector/history_${mode}.json
+  save_images:    false
+
+detection:
+  conf: 0.25
+  iou: 0.45
+  agnostic_nms: false
+  max_det: 1000
+  imgsz: 1024
+
+tracking:
+  use_roi: true
+  roi_coef: 0.15
+  track_activation_threshold: 0.25
+  lost_track_buffer: 30
+  minimum_matching_threshold: 0.8
+  frame_rate: 30
+
+reid:
+  type: self_supervised
+  backbone: swin_t                       # <-- ablation axis: architecture
+  weights: IMAGENET1K_V1
+  checkpoint_pretrain:  /workspace/cv-midterm/swin_t_visdrone_best.pth
+  checkpoint_finetuned: /workspace/cv-midterm/out/ssl_swin_projector/finetuned.pth
+  feat_dim: 768                          # swin-t feature dim (vs 2048 for r50)
+  embed_dim: 128
+  temperature: 0.2
+  roi_out: [7, 7]
+  roi_spatial_scale: 0.03125             # only used if swin features are fed to RoIAlign
+
+training:
+  steps: 5000
+  batch_size: 64
+  crop_size: [256, 128]
+  lr: 0.001
+  num_workers: 4
+  pin_memory: true
+  log_every: 10
+  seed: 69420
+  scheduler:
+    type: cosine
+    warmup_steps: 500
+    eta_min: 0.0
+    step_size: 1000
+    gamma: 0.1
+
+testing:
+  steps: 500
+  batch_size: 64
+  crop_size: [256, 128]
+  lr: 0.0001
+  freeze_backbone: true
+  num_workers: 4
+  pin_memory: true
+  log_every: 10
+  mot_eval_every: 0
+  val_every: 50
+  val_max_batches: 20
+  scheduler:
+    type: cosine
+    warmup_steps: 100
+    eta_min: 0.0
+    step_size: 500
+    gamma: 0.1
+
+evaluation:
+  verbose: true

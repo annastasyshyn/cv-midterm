@@ -1,0 +1,110 @@
+# @package _global_
+# Metric-learning quick smoke-test config.
+#
+# Intended as a fast sanity check of the triplet-finetune pipeline on the
+# supervised VisDrone backbone — not a real ablation run. 100 finetune steps
+# + single-sequence MOT eval ≈ < 1 minute end-to-end.
+#
+# Same checkpoint path convention as the SSL configs:
+#   resnet50 → /workspace/cv-midterm/resnet50_visdrone_best.pth
+#   swin_t   → /workspace/cv-midterm/swin_t_visdrone_best.pth
+# Swap the path below to switch architectures — the dispatcher in
+# eval.py:_detect_backbone_from_path picks resnet50/swin_t from the filename.
+
+models:
+  detection-model: mshamrai/yolov8n-visdrone
+
+mode: test
+
+data:
+  train:
+    root: /workspace/cv-midterm/VisDrone2019-MOT-val
+  val:
+    root: /workspace/cv-midterm/VisDrone2019-MOT-val
+  test:
+    # Option B — single sequence, for quick iteration.
+    mot_sequence:    /workspace/cv-midterm/VisDrone2019-MOT-test-dev/sequences/uav0000009_03358_v
+    mot_annotations: /workspace/cv-midterm/VisDrone2019-MOT-test-dev/annotations/uav0000009_03358_v.txt
+    mot_root:        null
+
+output:
+  images_tracked: /workspace/cv-midterm/out/ml_r50_quick/images
+  metrics_path:   /workspace/cv-midterm/out/ml_r50_quick/metrics.txt
+  history_path:   /workspace/cv-midterm/out/ml_r50_quick/history_${mode}.json
+  save_images:    false
+
+detection:
+  conf: 0.25
+  iou: 0.45
+  agnostic_nms: false
+  max_det: 1000
+  imgsz: 1024
+
+tracking:
+  use_roi: true
+  roi_coef: 0.25
+  track_activation_threshold: 0.25
+  lost_track_buffer: 30
+  minimum_matching_threshold: 0.8
+  frame_rate: 30
+
+reid:
+  type: metric_learning
+  backbone: resnet50
+  weights: IMAGENET1K_V1
+  checkpoint_pretrain:  /workspace/cv-midterm/resnet50_visdrone_best.pth
+  checkpoint_finetuned: /workspace/cv-midterm/out/ml_r50_quick/finetuned.pth
+  out_dim: 128
+  roi_out: [7, 7]
+  roi_spatial_scale: 0.03125
+
+# mode=train hyperparams (unused in mode=test but required for schema parity)
+training:
+  steps: 50
+  batch_size: 64
+  lr: 0.0001
+  num_workers: 4
+  pin_memory: true
+  log_every: 10
+  seed: 69420
+  n_ids: 8
+  k_per_id: 4
+  margin: 1.0
+  max_k: 5
+  ce_weight: 0.5
+  hard_negatives: true
+  freeze_backbone: false
+  scheduler:
+    type: cosine
+    warmup_steps: 500
+    eta_min: 0.0
+    step_size: 1000
+    gamma: 0.1
+
+testing:
+  steps: 100              # <-- quick smoke test; bump to 500-2000 for a real run
+  batch_size: 64
+  lr: 0.00001
+  freeze_backbone: true   # only the head finetunes; backbone stays as-loaded
+  num_workers: 24
+  pin_memory: true
+  log_every: 5            # more frequent logging given the short run
+  mot_eval_every: 0
+  val_every: 50           # held-out triplet loss fires twice during the 100 steps
+  val_max_batches: 10     # fewer val batches for speed
+  save_every: 0           # no stepped snapshots on a 100-step run — final save only
+  n_ids: 8
+  k_per_id: 4
+  margin: 1.0
+  max_k: 5
+  ce_weight: 0.5
+  hard_negatives: true
+  scheduler:
+    type: cosine
+    warmup_steps: 20      # short warmup; full cosine tail over the remaining 80 steps
+    eta_min: 0.0
+    step_size: 500
+    gamma: 0.1
+
+evaluation:
+  verbose: true

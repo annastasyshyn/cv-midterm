@@ -77,11 +77,11 @@ testing:
   crop_size: [256, 128]
   lr: 0.0001
   freeze_backbone: true    # <-- ablation axis
-  num_workers: 6
+  num_workers: 12
   pin_memory: true
   log_every: 10
   mot_eval_every: 0
-  val_every: 50
+  val_every: 100
   val_max_batches: 20
   save_every: 2000         # stepped snapshots: <finetuned>.step{N}.pth (0 disables)
   scheduler:

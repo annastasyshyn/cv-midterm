@@ -148,32 +148,56 @@ class TripletDataset(Dataset):
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
+class _SwinBackboneAdapter(nn.Module):
+    """Trim torchvision `swin_t` to its pre-head feature map and expose it as
+    (N, C, H', W') so EmbeddingModel.head (AdaptiveAvgPool2d + Linear) can
+    reuse the same downstream structure as the ResNet branch."""
+
+    def __init__(self, base):
+        super().__init__()
+        self.features = base.features
+        self.norm = base.norm
+
+    def forward(self, x):
+        x = self.features(x)            # (N, H', W', C)
+        x = self.norm(x)
+        return x.permute(0, 3, 1, 2)    # (N, C, H', W')
+
+
 class EmbeddingModel(nn.Module):
     def __init__(
         self,
         base,
         num_classes,
         out_dim=128,
+        backbone_type="resnet50",
+        feat_dim=2048,
     ):
         super().__init__()
 
-        # base = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
-
-        self.backbone = nn.Sequential(
-            base.conv1,
-            base.bn1,
-            base.relu,
-            base.maxpool,
-            base.layer1,
-            base.layer2,
-            base.layer3,
-            base.layer4,
-        )
+        if backbone_type == "resnet50":
+            self.backbone = nn.Sequential(
+                base.conv1,
+                base.bn1,
+                base.relu,
+                base.maxpool,
+                base.layer1,
+                base.layer2,
+                base.layer3,
+                base.layer4,
+            )
+        elif backbone_type == "swin_t":
+            self.backbone = _SwinBackboneAdapter(base)
+        else:
+            raise ValueError(
+                f"Unsupported backbone_type={backbone_type!r}. "
+                "Expected 'resnet50' or 'swin_t'."
+            )
 
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(2048, 512),
+            nn.Linear(feat_dim, 512),
             nn.ReLU(),
             nn.Linear(512, out_dim),
         )
@@ -311,6 +335,8 @@ def train_triplet(
     val_max_batches=20,
     mot_eval_fn=None,
     mot_eval_every=0,
+    checkpoint_fn=None,
+    checkpoint_every=0,
     history_path=None,
     log_every=10,
     desc="reid",
@@ -391,6 +417,9 @@ def train_triplet(
             history["mot"]["metrics"].append(metrics)
             model.train()
             _save_history(history, history_path)
+
+        if checkpoint_fn is not None and checkpoint_every and step % checkpoint_every == 0:
+            checkpoint_fn(step)
 
     _save_history(history, history_path)
     return history

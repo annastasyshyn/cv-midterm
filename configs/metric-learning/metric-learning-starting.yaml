@@ -60,13 +60,19 @@ tracking:
   lost_track_buffer: 30
   minimum_matching_threshold: 0.8
   frame_rate: 30
+  num_workers: 4             # DataLoader workers prefetching frames during MOT eval (0 = sync)
 
 reid:
   type: metric_learning
+  # Backbone is inferred from checkpoint_pretrain's filename:
+  #   * contains "resnet50" → torchvision ResNet50 (feat_dim=2048)
+  #   * contains "swin_t"   → torchvision Swin-T   (feat_dim=768)
+  # Anything else raises at build-time. So to swap architectures, point
+  # checkpoint_pretrain at a differently-named .pth; no other field changes.
   backbone: resnet50
   weights: IMAGENET1K_V1
-  checkpoint_pretrain:  /workspace/cv-midterm/ml_pretrain.pth
-  checkpoint_finetuned: /workspace/cv-midterm/ml_finetuned.pth
+  checkpoint_pretrain:  /workspace/cv-midterm/resnet50_visdrone_best.pth
+  checkpoint_finetuned: /workspace/cv-midterm/out/ml_resnet50/finetuned.pth
   out_dim: 128
   roi_out: [7, 7]
   roi_spatial_scale: 0.03125 # 1/32
@@ -109,6 +115,7 @@ testing:
                           # Uses data.test.mot_root if set (all test-dev seqs),
                           # otherwise falls back to data.test.mot_sequence (single-seq Option B).
   val_max_batches: 20     # PK batches per val pass (each drawn from the held-out identities)
+  save_every: 2000        # stepped snapshots: <finetuned>.step{N}.pth (0 disables)
   # triplet-specific (mirrors training:, typically kept equal or tightened)
   n_ids: 8
   k_per_id: 4

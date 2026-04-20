@@ -267,6 +267,8 @@ def train_self_supervised(
     val_max_batches=None,
     mot_eval_fn=None,
     mot_eval_every=0,
+    checkpoint_fn=None,
+    checkpoint_every=0,
     history_path=None,
     log_every=10,
     desc="ssl training",
@@ -282,6 +284,9 @@ def train_self_supervised(
 
     mot_eval_fn: optional callable `(step: int) -> dict` returning MOT metrics
       for the current model state (expensive — keep mot_eval_every large).
+    checkpoint_fn: optional callable `(step: int) -> None` — invoked every
+      `checkpoint_every` steps to persist a stepped snapshot of the model.
+      Cheap (state_dict write), so a 1-2k step cadence is reasonable.
     """
     history = {
         "mode": mode,
@@ -336,6 +341,9 @@ def train_self_supervised(
                 history["mot"]["metrics"].append(metrics)
                 model.train()
                 _save_history(history, history_path)
+
+            if checkpoint_fn is not None and checkpoint_every and step % checkpoint_every == 0:
+                checkpoint_fn(step)
 
     pbar.close()
     _save_history(history, history_path)

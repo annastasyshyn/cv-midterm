@@ -41,10 +41,11 @@ detection:
 tracking:
   use_roi: true
   roi_coef: 0.15
-  track_activation_threshold: 0.25
-  lost_track_buffer: 30
-  minimum_matching_threshold: 0.8
+  track_activation_threshold: 0.35
+  lost_track_buffer: 25
+  minimum_matching_threshold: 0.72
   frame_rate: 30
+  num_workers: 4             # DataLoader workers prefetching frames during MOT eval (0 = sync)
 
 reid:
   type: self_supervised
@@ -86,6 +87,7 @@ testing:
   mot_eval_every: 0
   val_every: 50
   val_max_batches: 20
+  save_every: 2000         # stepped snapshots: <finetuned>.step{N}.pth (0 disables)
   scheduler:
     type: cosine
     warmup_steps: 200      # <-- 2x A2: extra warmup for attention stability

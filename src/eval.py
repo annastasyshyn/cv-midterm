@@ -128,6 +128,7 @@ def _run_final_mot(cfg: DictConfig, det_model, reid_model, device):
         use_roi=cfg.tracking.use_roi,
         roi_coef=cfg.tracking.roi_coef,
         save_images=save_images,
+        num_workers=int(OmegaConf.select(cfg, "tracking.num_workers") or 4),
     )
     tracker.evaluate_mot(
         test_annotations,
@@ -215,6 +216,7 @@ def _run_final_mot_multi(cfg, det_model, reid_model, device, mot_root):
             use_roi=cfg.tracking.use_roi,
             roi_coef=cfg.tracking.roi_coef,
             save_images=save_images,
+            num_workers=int(OmegaConf.select(cfg, "tracking.num_workers") or 4),
         )
         accs.append(_build_mot_accumulator(ann_file, out_metrics))
         names.append(seq_name)
@@ -261,6 +263,7 @@ def _make_mot_eval_fn(cfg, det_model, reid_model, device, sequence, annotations)
             use_roi=cfg.tracking.use_roi,
             roi_coef=cfg.tracking.roi_coef,
             save_images=False,  # always skip for periodic eval — disk-prohibitive otherwise
+            num_workers=int(OmegaConf.select(cfg, "tracking.num_workers") or 4),
         )
         summary = tracker.evaluate_mot(annotations, ckpt_metrics_path, verbose=False)
         if was_training:
@@ -298,16 +301,16 @@ def _detect_backbone_from_path(path: str) -> str:
     )
 
 
-def _is_ssl_embedder_state(state: dict) -> bool:
+def _is_wrapped_embedder_state(state: dict) -> bool:
     """
-    True when `state` looks like a saved `SelfSupervisedInstanceEmbedder`
-    (has the `backbone.` / `projector.` prefixes our wrapping introduces).
+    True when `state` looks like a saved SSL or metric-learning embedder
+    (has the `backbone.` prefix our wrappers introduce).
     False when it looks like a bare torchvision backbone state_dict
     (e.g. `conv1.weight` / `layer1.*` for ResNet, `features.*` / `norm.*`
-    / `head.*` for Swin-T) — i.e. a classifier pretrained directly on the
-    raw architecture, with no SSL projector baked in.
+    / `head.*` for Swin-T) — a classifier pretrained directly on the raw
+    architecture, with no SSL projector / ML head baked in.
     """
-    return any(k.startswith("backbone.") or k.startswith("projector.") for k in state.keys())
+    return any(k.startswith("backbone.") for k in state.keys())
 
 
 def _build_ssl_backbone_model(cfg, device, raw_backbone_state=None, imagenet_init=True):
@@ -454,7 +457,7 @@ def _ssl_test(cfg, det_model, device):
         raise ValueError("mode=test requires `data.val.root`.")
 
     state = _load_state_dict(cfg.reid.checkpoint_pretrain, device)
-    if _is_ssl_embedder_state(state):
+    if _is_wrapped_embedder_state(state):
         # Full SSL embedder checkpoint (backbone + projector, produced by
         # a prior mode=train run). Build an empty embedder and load all of it.
         model = _build_ssl_backbone_model(cfg, device, imagenet_init=False)
@@ -527,6 +530,22 @@ def _ssl_test(cfg, det_model, device):
             seq, ann = _resolve_test_paths(cfg)
             mot_eval_fn = _make_mot_eval_fn(cfg, det_model, model, device, seq, ann)
 
+        # Periodic stepped checkpoints under the finetuned path, e.g.
+        # `out/ssl_r50_full/finetuned.step02000.pth`. The final post-loop
+        # save still lands at `cfg.reid.checkpoint_finetuned` so downstream
+        # eval picks up the last weights regardless of save_every.
+        save_every = int(OmegaConf.select(cfg, "testing.save_every") or 0)
+        checkpoint_fn = None
+        if save_every > 0:
+            ckpt_base = cfg.reid.checkpoint_finetuned
+            os.makedirs(os.path.dirname(ckpt_base) or ".", exist_ok=True)
+
+            def checkpoint_fn(step, _base=ckpt_base):
+                stem, ext = os.path.splitext(_base)
+                stepped = f"{stem}.step{step:06d}{ext or '.pth'}"
+                torch.save(model.state_dict(), stepped)
+                print(f"[ssl/test] ckpt@step={step} → {stepped}")
+
         train_self_supervised(
             model=model,
             train_loader=finetune_loader,
@@ -539,6 +558,8 @@ def _ssl_test(cfg, det_model, device):
             val_max_batches=OmegaConf.select(cfg, "testing.val_max_batches"),
             mot_eval_fn=mot_eval_fn,
             mot_eval_every=int(cfg.testing.mot_eval_every),
+            checkpoint_fn=checkpoint_fn,
+            checkpoint_every=save_every,
             history_path=cfg.output.history_path,
             log_every=int(cfg.testing.log_every),
             desc="ssl finetune",
@@ -556,13 +577,51 @@ def _ssl_test(cfg, det_model, device):
 
 # ---------- metric-learning flows -------------------------------------------
 
-def _build_ml_model(cfg, device, num_classes=0):
+_BACKBONE_FEAT_DIM = {"resnet50": 2048, "swin_t": 768}
+
+
+def _build_ml_model(cfg, device, num_classes=0, raw_backbone_state=None, imagenet_init=True):
+    """
+    Build the metric-learning EmbeddingModel. Mirrors `_build_ssl_backbone_model`:
+      - backbone type is inferred from `cfg.reid.checkpoint_pretrain` filename
+      - `imagenet_init=False` skips the torchvision ImageNet download when the
+        caller is about to overwrite every weight anyway (`mode=test`)
+      - `raw_backbone_state` (bare torchvision state_dict) is stripped of its
+        classifier head and loaded into `base` before wrapping, so the
+        EmbeddingModel's `head` stays random-init and gets trained during
+        finetune.
+    """
     from metric import EmbeddingModel
-    base = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
+
+    backbone_type = _detect_backbone_from_path(cfg.reid.checkpoint_pretrain)
+    if backbone_type == "resnet50":
+        base = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1 if imagenet_init else None)
+    elif backbone_type == "swin_t":
+        base = swin_t(weights=Swin_T_Weights.IMAGENET1K_V1 if imagenet_init else None)
+    else:
+        raise ValueError(f"Unsupported backbone_type={backbone_type!r}")
+
+    if raw_backbone_state is not None:
+        head_keys = {
+            "resnet50": ("fc.weight", "fc.bias"),
+            "swin_t":   ("head.weight", "head.bias"),
+        }[backbone_type]
+        filtered_state = {k: v for k, v in raw_backbone_state.items() if k not in head_keys}
+        dropped = [k for k in head_keys if k in raw_backbone_state]
+        missing, unexpected = base.load_state_dict(filtered_state, strict=False)
+        print(
+            f"[ml] loaded raw {backbone_type} weights "
+            f"(missing={len(missing)}, unexpected={len(unexpected)}, "
+            f"dropped_head={dropped})"
+        )
+
+    print(f"[ml] backbone={backbone_type} (inferred from {cfg.reid.checkpoint_pretrain})")
     return EmbeddingModel(
         base=base,
         num_classes=num_classes,
         out_dim=cfg.reid.out_dim,
+        backbone_type=backbone_type,
+        feat_dim=_BACKBONE_FEAT_DIM[backbone_type],
     ).to(device)
 
 
@@ -648,12 +707,25 @@ def _ml_test(cfg, det_model, device):
         raise ValueError("mode=test requires `data.val.root`.")
 
     state = _load_state_dict(cfg.reid.checkpoint_pretrain, device)
-    num_classes = 0
-    if "classifier.weight" in state:
-        num_classes = state["classifier.weight"].shape[0]
-    model = _build_ml_model(cfg, device, num_classes=num_classes)
-    model.load_state_dict(state)
-    print(f"[ml/test] loaded pretrain: {cfg.reid.checkpoint_pretrain}")
+    if _is_wrapped_embedder_state(state):
+        # Full EmbeddingModel checkpoint (backbone + head, from a prior ML
+        # mode=train run). Build an empty wrapper and load everything.
+        num_classes = 0
+        if "classifier.weight" in state:
+            num_classes = state["classifier.weight"].shape[0]
+        model = _build_ml_model(cfg, device, num_classes=num_classes, imagenet_init=False)
+        model.load_state_dict(state)
+        print(f"[ml/test] loaded wrapped embedder: {cfg.reid.checkpoint_pretrain}")
+    else:
+        # Bare torchvision backbone (supervised pretrain on VisDrone, no
+        # EmbeddingModel head). Head stays random-init — must be trained.
+        model = _build_ml_model(cfg, device, raw_backbone_state=state, imagenet_init=False)
+        print(f"[ml/test] loaded raw backbone: {cfg.reid.checkpoint_pretrain} "
+              "(head random-init, will be trained during finetune)")
+        if int(cfg.testing.steps) == 0:
+            print("[ml/test] WARNING: raw backbone + testing.steps=0 → "
+                  "embeddings are a random projection of backbone features; "
+                  "MOT metrics will be essentially random.")
 
     steps = int(cfg.testing.steps)
     if steps > 0:
@@ -682,6 +754,21 @@ def _ml_test(cfg, det_model, device):
             seq, ann = _resolve_test_paths(cfg)
             mot_eval_fn = _make_mot_eval_fn(cfg, det_model, model, device, seq, ann)
 
+        # Periodic stepped checkpoints under the finetuned path — same
+        # pattern as _ssl_test. Final post-loop save still lands at
+        # `cfg.reid.checkpoint_finetuned`.
+        save_every = int(OmegaConf.select(cfg, "testing.save_every") or 0)
+        checkpoint_fn = None
+        if save_every > 0:
+            ckpt_base = cfg.reid.checkpoint_finetuned
+            os.makedirs(os.path.dirname(ckpt_base) or ".", exist_ok=True)
+
+            def checkpoint_fn(step, _base=ckpt_base):
+                stem, ext = os.path.splitext(_base)
+                stepped = f"{stem}.step{step:06d}{ext or '.pth'}"
+                torch.save(model.state_dict(), stepped)
+                print(f"[ml/test] ckpt@step={step} → {stepped}")
+
         train_triplet(
             model=model,
             dataset=dataset,
@@ -701,6 +788,8 @@ def _ml_test(cfg, det_model, device):
             val_max_batches=OmegaConf.select(cfg, "testing.val_max_batches"),
             mot_eval_fn=mot_eval_fn,
             mot_eval_every=int(cfg.testing.mot_eval_every),
+            checkpoint_fn=checkpoint_fn,
+            checkpoint_every=save_every,
             history_path=cfg.output.history_path,
             log_every=int(cfg.testing.log_every),
             desc="ml finetune",

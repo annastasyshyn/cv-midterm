@@ -42,7 +42,6 @@ tracking:
   lost_track_buffer: 25
   minimum_matching_threshold: 0.72
   frame_rate: 30
-  num_workers: 4             # DataLoader workers prefetching frames during MOT eval (0 = sync)
 
 reid:
   type: self_supervised

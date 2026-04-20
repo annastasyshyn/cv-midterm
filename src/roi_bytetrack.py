@@ -9,31 +9,7 @@ from ultralyticsplus import YOLO
 
 import torch
 import torchvision.transforms as T
-from torch.utils.data import DataLoader, Dataset
 from torchvision.models import resnet50, ResNet50_Weights
-
-
-class _FrameDataset(Dataset):
-    """Loads RGB frames by index. Used by `process_tracking` to overlap
-    cv2.imread disk I/O with the GPU forward via a multi-worker DataLoader."""
-
-    def __init__(self, image_paths):
-        self.image_paths = image_paths
-
-    def __len__(self):
-        return len(self.image_paths)
-
-    def __getitem__(self, idx):
-        frame = cv2.imread(self.image_paths[idx])
-        if frame is None:
-            return idx, None
-        return idx, cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-
-def _frame_collate(batch):
-    # Variable-size uint8 arrays can't be stacked — pass the (idx, arr) pair
-    # through unchanged. batch_size is fixed at 1 upstream.
-    return batch[0]
 
 from supervision.detection.core import Detections
 from supervision.detection.utils.iou_and_nms import box_iou_batch
@@ -187,7 +163,9 @@ class ROIByteTrack:
                 refind_stracks.append(track)
 
         """ Step 3: Second association, with low score detection boxes"""
-        # association the untrack to the low score detections
+        # association the untrack to the low score detections.
+        # Low-score detections participate only in the IoU-based recovery —
+        # they never get re-id features attached, so curr_feat=None.
         if len(dets_second) > 0:
             """Detections"""
             detections_second = [
@@ -198,6 +176,7 @@ class ROIByteTrack:
                     self.shared_kalman,
                     self.internal_id_counter,
                     self.external_id_counter,
+                    curr_feat=None,
                 )
                 for (tlbr, score_second) in zip(dets_second, scores_second)
             ]
@@ -373,14 +352,7 @@ class ROIByteTrack:
                          mot_file_path = "detection_metrics.txt",
                          use_roi = False,
                          roi_coef = 0.5,
-                         save_images = True,
-                         num_workers = 4):
-        """
-        num_workers: DataLoader workers prefetching frames off disk in parallel
-          with the GPU forward. 0 → sync cv2.imread on the main thread
-          (old behaviour). Order is preserved (shuffle=False) — the tracker's
-          sequential-state invariants are unaffected.
-        """
+                         save_images = True):
 
         image_paths = sorted([
             os.path.join(source_dir, f) for f in os.listdir(source_dir)
@@ -390,29 +362,11 @@ class ROIByteTrack:
         if save_images and not os.path.exists(target_dir):
             os.makedirs(target_dir)
 
-        if num_workers and num_workers > 0:
-            loader = DataLoader(
-                _FrameDataset(image_paths),
-                batch_size=1,
-                shuffle=False,
-                num_workers=num_workers,
-                prefetch_factor=2,
-                collate_fn=_frame_collate,
-            )
-            frame_stream = ((idx, image_paths[idx], frame) for idx, frame in loader)
-        else:
-            def _sync_iter():
-                for idx, p in enumerate(image_paths):
-                    img = cv2.imread(p)
-                    if img is None:
-                        yield idx, p, None
-                    else:
-                        yield idx, p, cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            frame_stream = _sync_iter()
-
         with open(mot_file_path, "w", encoding="utf-8") as mot_file:
 
-            for frame_idx, img_path, frame in frame_stream:
+            for frame_idx, img_path in enumerate(image_paths):
+                frame = cv2.imread(img_path)
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 if frame is None:
                     continue
 

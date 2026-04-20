@@ -128,7 +128,6 @@ def _run_final_mot(cfg: DictConfig, det_model, reid_model, device):
         use_roi=cfg.tracking.use_roi,
         roi_coef=cfg.tracking.roi_coef,
         save_images=save_images,
-        num_workers=int(OmegaConf.select(cfg, "tracking.num_workers") or 4),
     )
     tracker.evaluate_mot(
         test_annotations,
@@ -216,7 +215,6 @@ def _run_final_mot_multi(cfg, det_model, reid_model, device, mot_root):
             use_roi=cfg.tracking.use_roi,
             roi_coef=cfg.tracking.roi_coef,
             save_images=save_images,
-            num_workers=int(OmegaConf.select(cfg, "tracking.num_workers") or 4),
         )
         accs.append(_build_mot_accumulator(ann_file, out_metrics))
         names.append(seq_name)
@@ -263,7 +261,6 @@ def _make_mot_eval_fn(cfg, det_model, reid_model, device, sequence, annotations)
             use_roi=cfg.tracking.use_roi,
             roi_coef=cfg.tracking.roi_coef,
             save_images=False,  # always skip for periodic eval — disk-prohibitive otherwise
-            num_workers=int(OmegaConf.select(cfg, "tracking.num_workers") or 4),
         )
         summary = tracker.evaluate_mot(annotations, ckpt_metrics_path, verbose=False)
         if was_training:

@@ -78,7 +78,7 @@ testing:
   crop_size: [256, 128]
   lr: 0.00005              # <-- 2x smaller than A1 (everything trains)
   freeze_backbone: false   # <-- ablation axis
-  num_workers: 12
+  num_workers: 4
   pin_memory: true
   log_every: 10
   mot_eval_every: 0

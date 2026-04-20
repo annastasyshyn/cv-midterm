@@ -80,7 +80,7 @@ testing:
   crop_size: [256, 128]
   lr: 0.0001
   freeze_backbone: true
-  num_workers: 12
+  num_workers: 4
   pin_memory: true
   log_every: 10
   mot_eval_every: 0

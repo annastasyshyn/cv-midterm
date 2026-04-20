@@ -310,21 +310,26 @@ def _is_ssl_embedder_state(state: dict) -> bool:
     return any(k.startswith("backbone.") or k.startswith("projector.") for k in state.keys())
 
 
-def _build_ssl_backbone_model(cfg, device, raw_backbone_state=None):
+def _build_ssl_backbone_model(cfg, device, raw_backbone_state=None, imagenet_init=True):
     """
     Build the SSL embedder. When `raw_backbone_state` is provided (a bare
     torchvision backbone state_dict), it is loaded into the base model
     BEFORE the embedder wraps it — so the wrapped `backbone` sub-module
     inherits the pretrained weights while the `projector` stays randomly
     initialised and is later learned during finetuning.
+
+    `imagenet_init`: when False, skip torchvision's ImageNet weight download
+      — useful in `mode=test` where we're about to overwrite every weight
+      with a user-supplied checkpoint anyway. Default True preserves the
+      `mode=train` behaviour (pretrain starts from ImageNet).
     """
     from self_supervised import SelfSupervisedInstanceEmbedder
 
     backbone_type = _detect_backbone_from_path(cfg.reid.checkpoint_pretrain)
     if backbone_type == "resnet50":
-        base = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
+        base = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1 if imagenet_init else None)
     elif backbone_type == "swin_t":
-        base = swin_t(weights=Swin_T_Weights.IMAGENET1K_V1)
+        base = swin_t(weights=Swin_T_Weights.IMAGENET1K_V1 if imagenet_init else None)
     else:
         raise ValueError(f"Unsupported backbone_type={backbone_type!r}")
 
@@ -452,7 +457,7 @@ def _ssl_test(cfg, det_model, device):
     if _is_ssl_embedder_state(state):
         # Full SSL embedder checkpoint (backbone + projector, produced by
         # a prior mode=train run). Build an empty embedder and load all of it.
-        model = _build_ssl_backbone_model(cfg, device)
+        model = _build_ssl_backbone_model(cfg, device, imagenet_init=False)
         model.load_state_dict(state)
         print(f"[ssl/test] loaded SSL embedder: {cfg.reid.checkpoint_pretrain}")
     else:
@@ -461,7 +466,7 @@ def _ssl_test(cfg, det_model, device):
         # before wrapping; projector stays random-init and must be trained
         # during finetune — so testing.steps=0 with this flavor yields
         # random-projection embeddings.
-        model = _build_ssl_backbone_model(cfg, device, raw_backbone_state=state)
+        model = _build_ssl_backbone_model(cfg, device, raw_backbone_state=state, imagenet_init=False)
         print(f"[ssl/test] loaded raw backbone: {cfg.reid.checkpoint_pretrain} "
               "(projector random-init, will be trained during finetune)")
         if int(cfg.testing.steps) == 0:

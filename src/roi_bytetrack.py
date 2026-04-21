@@ -23,12 +23,13 @@ class ROIByteTrack:
     def __init__(self,
                  model,
                  reid_model,
-                 device = "cuda",):
+                 device = "cuda",
+                 tracker_params: dict = None):
 
         self.device = device
         self.reid_model = reid_model
         self.model = model
-        
+
         self.reid_model.to(device)
         self.model.to(device)
 
@@ -39,48 +40,50 @@ class ROIByteTrack:
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
+        default_tracker_params = {
+            "track_activation_threshold": 0.35,
+            "lost_track_buffer": 25,
+            "minimum_matching_threshold": 0.72,
+            "frame_rate": 30,
+        }
+        if tracker_params:
+            default_tracker_params.update(tracker_params)
 
         self.box_annotator = sv.BoxAnnotator()
         self.label_annotator = sv.LabelAnnotator()
-        self.tracker = sv.ByteTrack(
-            track_activation_threshold=0.25,
-            lost_track_buffer=30,
-            minimum_matching_threshold=0.8,
-            frame_rate=30
-        )
+        self.tracker = sv.ByteTrack(**default_tracker_params)
     
     @staticmethod
-    def embedding_distance(strack_pool, detections): #TODO: make not static
-
+    def embedding_distance(strack_pool, detections):
         strack_pool_len = len(strack_pool)
         detections_len = len(detections)
 
         if strack_pool_len == 0 or detections_len == 0:
             return np.zeros((strack_pool_len, detections_len), dtype=np.float32)
 
-        #device = "cuda" if torch.cuda.is_available() else "cpu"
-        
+        cost_matrix = np.full((strack_pool_len, detections_len), 0.5, dtype=np.float32)
+
+        valid_pool_idx = [i for i, t in enumerate(strack_pool) if t.curr_feat is not None]
+        valid_det_idx = [i for i, d in enumerate(detections) if d.curr_feat is not None]
+
+        if not valid_pool_idx or not valid_det_idx:
+            return cost_matrix
+
         pool_feats = torch.stack([
-            torch.as_tensor(t.curr_feat, dtype=torch.float32)#, device=device) 
-            for t in strack_pool
+            torch.as_tensor(strack_pool[i].curr_feat, dtype=torch.float32)
+            for i in valid_pool_idx
         ])
-        
         det_feats = torch.stack([
-            torch.as_tensor(d.curr_feat, dtype=torch.float32)#, device=device) 
-            for d in detections
+            torch.as_tensor(detections[i].curr_feat, dtype=torch.float32)
+            for i in valid_det_idx
         ])
 
-        cos_sim = torch.cosine_similarity(
-            pool_feats.unsqueeze(1),
-            det_feats.unsqueeze(0),
-            dim=2
-        )
+        cos_sim = torch.cosine_similarity(pool_feats.unsqueeze(1), det_feats.unsqueeze(0), dim=2)
+        partial = torch.clamp(1 - cos_sim, 0, 1).cpu().numpy()
 
-        cost_matrix = 1 - cos_sim
-        
-        cost_matrix = torch.clamp(cost_matrix, 0, 1)
+        cost_matrix[np.ix_(valid_pool_idx, valid_det_idx)] = partial
 
-        return cost_matrix.cpu().numpy()
+        return cost_matrix
         
     @staticmethod
     def update_with_tensors(self, tensors: np.ndarray, embeddings: np.ndarray = None, roi_coef = 0.5, ema_coef = 0.4) -> list[STrack]:
@@ -319,27 +322,28 @@ class ROIByteTrack:
 
     def process_traching(self, 
                          source_dir, 
-                         target_dir, 
+                         target_dir = None, 
                          mot_file_path = "detection_metrics.txt", 
                          use_roi = False, 
                          roi_coef = 0.5,
-                         ema_coef = 0.4):
+                         ema_coef = 0.4,
+                         verbose = True):
 
         image_paths = sorted([
             os.path.join(source_dir, f) for f in os.listdir(source_dir) 
             if f.lower().endswith(('.png', '.jpg', '.jpeg'))
         ])
 
-        if not os.path.exists(target_dir):
+        if target_dir is not None and not os.path.exists(target_dir):
             os.makedirs(target_dir)
 
         with open(mot_file_path, "w", encoding="utf-8") as mot_file:
 
             for frame_idx, img_path in enumerate(image_paths):
                 frame = cv2.imread(img_path)
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 if frame is None:
                     continue
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
                 results = self.model(frame, verbose=False, imgsz=1024)[0] #train image size
                 detections = sv.Detections.from_ultralytics(results)
@@ -370,16 +374,18 @@ class ROIByteTrack:
                     annotated_frame = self.box_annotator.annotate(frame.copy(), detections=detections)
                     annotated_frame = self.label_annotator.annotate(annotated_frame, detections=detections, labels=labels)
                     
-                    output_path = os.path.join(target_dir, os.path.basename(img_path))
-                    cv2.imwrite(output_path, annotated_frame)
+                    if target_dir is not None:
+                        output_path = os.path.join(target_dir, os.path.basename(img_path))
+                        cv2.imwrite(output_path, annotated_frame)
 
-                if frame_idx % 50 == 0:
+                if frame_idx % 50 == 0 and verbose:
                     print(f"Processed {frame_idx}/{len(image_paths)} images")
     
     @staticmethod
     def evaluate_mot(gt_file, res_file, verbose = True):
         gt_cols = ['frame', 'id', 'x', 'y', 'w', 'h', 'conf', 'class', 'trunc', 'occ']
         gt_df = pd.read_csv(gt_file, header=None, names=gt_cols)
+        gt_df = gt_df[gt_df['conf'] != 0]
 
         res_cols = ['frame', 'id', 'x', 'y', 'w', 'h', 'conf', 'v1', 'v2', 'v3']
         res_df = pd.read_csv(res_file, header=None, names=res_cols)
@@ -410,20 +416,21 @@ class ROIByteTrack:
         
         if verbose:
             str_summary = mm.io.render_summary(
-                summary, 
-                formatters=mh.formatters, 
+                summary,
+                formatters=mh.formatters,
                 namemap=mm.io.motchallenge_metric_names
             )
             print("\n--- MOT Evaluation Results ---")
             print(str_summary)
 
-        return summary
+        return summary, acc
 
 
 def main():
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = YOLO('mshamrai/yolov8n-visdrone') # model for detection
+    model = YOLO('mshamrai/yolov8s-visdrone') # model for detection
     model.overrides['conf'] = 0.25
     model.overrides['iou'] = 0.45
     model.overrides['agnostic_nms'] = False
@@ -433,28 +440,60 @@ def main():
     reid_model.fc = torch.nn.Identity()
     reid_model.to(device).eval()
 
-    track = ROIByteTrack(model = model,
-                         reid_model=reid_model,
-                         device=device
-                         )
-    
-    mot_metricks_path = "detection_metrics.txt" # path where mot metricks will be stored, maybe will rework this
-    
-    roi_coef = 0.25
-    ema_coef = 0.4
+    roi_coef = 0
+    ema_coef = None
 
-    track.process_traching("../task1_2/VisDrone2019-MOT-test-dev/sequences/uav0000009_03358_v", # path to dataset image sequence
-                           "output_images_tracked",  #path to output tracked objects on the image
-                           mot_metricks_path,
-                           use_roi = True,
-                           roi_coef = roi_coef,
-                           ema_coef = ema_coef
-                           )
+    sequences_root = "../task1_2/VisDrone2019-MOT-test-dev/sequences"
+    annotations_root = "../task1_2/VisDrone2019-MOT-test-dev/annotations"
 
-    track.evaluate_mot("../task1_2/VisDrone2019-MOT-test-dev/annotations/uav0000009_03358_v.txt", #path to annotations
-                       mot_metricks_path,
-                       verbose = True
-                       )
+    sequences = sorted(os.listdir(sequences_root))
+
+    all_accs = []
+    all_names = []
+
+    for seq_name in sequences:
+        
+        track = ROIByteTrack(model = model,
+                            reid_model = reid_model,
+                            device = device
+                        )
+        
+        seq_path = os.path.join(sequences_root, seq_name)
+        ann_path = os.path.join(annotations_root, seq_name + ".txt")
+        mot_metricks_path = f"detection_metrics_{seq_name}.txt"
+        output_path = None #f"output_images_tracked_{seq_name}" #None
+
+        print(f"\n=== Processing sequence: {seq_name} ===")
+
+        track.process_traching(seq_path,
+                               output_path,
+                               mot_metricks_path,
+                               use_roi = False,
+                               roi_coef = roi_coef,
+                               ema_coef = ema_coef
+                               )
+
+        if os.path.exists(ann_path):
+            _, acc = track.evaluate_mot(ann_path,
+                                        mot_metricks_path,
+                                        verbose = True
+                                        )
+            all_accs.append(acc)
+            all_names.append(seq_name)
+        else:
+            print(f"No annotation found for {seq_name}, skipping evaluation.")
+
+    if all_accs:
+        print("\n=== OVERALL DATASET METRICS ===")
+        mh = mm.metrics.create()
+        metrics_list = ['mota', 'motp', 'idf1', 'mostly_tracked', 'mostly_lost', 'num_switches']
+        overall = mh.compute_many(all_accs, names=all_names, metrics=metrics_list, generate_overall=True)
+        str_overall = mm.io.render_summary(
+            overall,
+            formatters=mh.formatters,
+            namemap=mm.io.motchallenge_metric_names
+        )
+        print(str_overall)
 
 if __name__ == "__main__":
     main()

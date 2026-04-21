@@ -25,7 +25,7 @@ class STrack:
         shared_kalman: KalmanFilter,
         internal_id_counter: IdCounter,
         external_id_counter: IdCounter,
-        curr_feat
+        curr_feat = None
     ):
         self.state = TrackState.New
         self.is_activated = False
@@ -127,10 +127,10 @@ class STrack:
             if self.external_track_id == self.external_id_counter.NO_ID:
                 self.external_track_id = self.external_id_counter.new_id()
 
-        if alpha:
+        if alpha and self.curr_feat is not None and new_track.curr_feat is not None:
             self.curr_feat = alpha * self.curr_feat + (1 - alpha) * new_track.curr_feat
         else:
-            self.curr_feat = new_track.curr_featt
+            self.curr_feat = new_track.curr_feat
         
         self.score = new_track.score
 

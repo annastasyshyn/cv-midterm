@@ -228,9 +228,11 @@ def triplet_loss(
     emb: torch.Tensor,
     labels: torch.Tensor,
     frame_ids: torch.Tensor,
+    bboxes: torch.Tensor,
     margin: float,
     max_k: int,
     hard_negatives: bool = True,
+    iou_neg_threshold: float = 0.1,
 ) -> torch.Tensor:
 
     B = emb.size(0)
@@ -254,12 +256,40 @@ def triplet_loss(
 
         same_frame = frame_ids == frame_ids[i]
         same_frame_neg_mask = neg_mask & same_frame
-        neg_mask_to_use = same_frame_neg_mask if same_frame_neg_mask.any() else neg_mask
+
+        if same_frame_neg_mask.any():
+            ba = bboxes[i]
+            bb = bboxes[same_frame_neg_mask.nonzero(as_tuple=True)[0]]
+            inter = (
+                (torch.min(ba[2], bb[:, 2]) - torch.max(ba[0], bb[:, 0])).clamp(0)
+                * (torch.min(ba[3], bb[:, 3]) - torch.max(ba[1], bb[:, 1])).clamp(0)
+            )
+            area_a = (ba[2] - ba[0]) * (ba[3] - ba[1])
+            area_b = (bb[:, 2] - bb[:, 0]) * (bb[:, 3] - bb[:, 1])
+            iou = inter / (area_a + area_b - inter).clamp(min=1e-6)
+
+            valid_same_frame = iou <= iou_neg_threshold
+            filtered_same_frame_neg = same_frame_neg_mask.clone()
+            filtered_same_frame_neg[same_frame_neg_mask.nonzero(as_tuple=True)[0]] = valid_same_frame
+            neg_mask_to_use = filtered_same_frame_neg if filtered_same_frame_neg.any() else neg_mask
+        else:
+            neg_mask_to_use = neg_mask
 
         if hard_negatives:
             neg_dists = nn.functional.pairwise_distance(emb[i : i + 1], emb)
-            neg_dists[~neg_mask_to_use] = float("inf")
-            k = neg_dists.argmin().item()
+            d_pos = nn.functional.pairwise_distance(emb[i : i + 1], emb[j : j + 1])
+            dynamic_margin = margin * (1.0 + frame_deltas[j] / max_k)
+
+            semi_hard_mask = (neg_dists[0] > d_pos) & (neg_dists[0] < d_pos + dynamic_margin) & neg_mask_to_use
+            if semi_hard_mask.any():
+                k = semi_hard_mask.nonzero(as_tuple=True)[0][neg_dists[0][semi_hard_mask].argmin()].item()
+            else:
+                beyond_pos = (neg_dists[0] > d_pos) & neg_mask_to_use
+                if beyond_pos.any():
+                    k = beyond_pos.nonzero(as_tuple=True)[0][neg_dists[0][beyond_pos].argmin()].item()
+                else:
+                    neg_dists[0, ~neg_mask_to_use] = float("inf")
+                    k = neg_dists[0].argmin().item()
         else:
             neg_idxs = neg_mask_to_use.nonzero(as_tuple=True)[0]
             if len(neg_idxs) == 0:
@@ -292,14 +322,15 @@ def evaluate_triplet_loss(
     losses = []
     for _ in range(max_batches):
         try:
-            crops, labels, frame_ids = val_dataset.sample_nk_batch(n_ids, k_per_id, max_k)
+            crops, labels, frame_ids, bboxes = val_dataset.sample_nk_batch(n_ids, k_per_id, max_k)
         except (IndexError, ValueError):
             break
         crops = crops.to(device)
         labels = labels.to(device)
         frame_ids = frame_ids.to(device)
+        bboxes = bboxes.to(device)
         emb = model(crops)
-        loss = triplet_loss(emb, labels, frame_ids, margin, max_k, hard_negatives)
+        loss = triplet_loss(emb, labels, frame_ids, bboxes, margin, max_k, hard_negatives)
         losses.append(loss.item())
     if was_training:
         model.train()
@@ -325,6 +356,8 @@ def train_triplet(
     k_per_id=4,
     margin=1.0,
     max_k=5,
+    max_k_max=None,
+    max_k_warmup=None,
     ce_weight=0.5,
     hard_negatives=True,
     freeze_backbone=False,
@@ -369,18 +402,28 @@ def train_triplet(
         else None
     )
 
+    _use_dynamic_k = max_k_max is not None and max_k_max > max_k
+    _k_warmup = max_k_warmup or (steps // 2)
+
+    def _current_max_k(step):
+        if _use_dynamic_k:
+            return int(max_k + (max_k_max - max_k) * min(1.0, step / _k_warmup))
+        return max_k
+
     running = []
     for step in tqdm(range(1, steps + 1), desc=desc):
-        crops, labels, frame_ids = dataset.sample_nk_batch(n_ids, k_per_id, max_k)
+        cur_max_k = _current_max_k(step)
+        crops, labels, frame_ids, bboxes = dataset.sample_nk_batch(n_ids, k_per_id, cur_max_k)
 
         crops = crops.to(device)
         labels = labels.to(device)
         frame_ids = frame_ids.to(device)
+        bboxes = bboxes.to(device)
 
         optimizer.zero_grad()
         emb = model(crops)
 
-        loss = triplet_loss(emb, labels, frame_ids, margin, max_k, hard_negatives)
+        loss = triplet_loss(emb, labels, frame_ids, bboxes, margin, cur_max_k, hard_negatives)
 
         if ce_fn is not None:
             unique_labels, remapped = torch.unique(labels, return_inverse=True)

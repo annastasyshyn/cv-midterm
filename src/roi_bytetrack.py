@@ -12,6 +12,8 @@ import torchvision.transforms as T
 from torch.utils.data import DataLoader, Dataset
 from torchvision.models import resnet50, ResNet50_Weights
 
+from hota_metric import compute_hota_metrics
+
 
 class _FrameDataset(Dataset):
     """Loads RGB frames by index. Used by `process_tracking` to overlap
@@ -486,15 +488,24 @@ class ROIByteTrack:
         metrics_list = ['mota', 'motp', 'idf1', 'mostly_tracked', 'mostly_lost', 'num_switches']
 
         summary = mh.compute(acc, metrics=metrics_list, name='ByteTrack_Baseline')
-        
+
+        # Compute HOTA
+        hota_dict = compute_hota_metrics(gt_file, res_file)
+        summary['hota'] = [hota_dict['hota']]
+
         if verbose:
             str_summary = mm.io.render_summary(
-                summary, 
-                formatters=mh.formatters, 
+                summary,
+                formatters=mh.formatters,
                 namemap=mm.io.motchallenge_metric_names
             )
             print("\n--- MOT Evaluation Results ---")
             print(str_summary)
+            print(f"\n--- HOTA Metric ---")
+            print(f"HOTA: {hota_dict['hota']:.4f}")
+            print(f"DetA: {hota_dict['deta']:.4f}")
+            print(f"AssA: {hota_dict['assa']:.4f}")
+            print(f"LocA: {hota_dict['loca']:.4f}")
 
         return summary
 

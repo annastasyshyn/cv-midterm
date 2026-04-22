@@ -1,3 +1,4 @@
+import json
 import os
 
 import hydra
@@ -21,6 +22,7 @@ from torchvision.models import (
 from ultralyticsplus import YOLO
 
 from roi_bytetrack import ROIByteTrack
+from hota_metric import compute_hota_metrics
 
 
 # ---------- path helpers ----------------------------------------------------
@@ -46,6 +48,8 @@ def _coerce_float(v):
 
 
 def _load_state_dict(path, device):
+    if path is None:
+        return None
     obj = torch.load(path, map_location=device)
     if isinstance(obj, dict) and "model_state" in obj:
         return obj["model_state"]
@@ -229,12 +233,31 @@ def _run_final_mot_multi(cfg, det_model, reid_model, device, mot_root):
         accs, metrics=metrics_list, names=names, generate_overall=True
     )
 
+    # Compute HOTA for each sequence and overall
+    hota_scores = {}
+    annotations_dir = os.path.join(mot_root, "annotations")
+    for seq_name in names:
+        ann_file = os.path.join(annotations_dir, seq_name + ".txt")
+        out_metrics = f"{metrics_prefix}.{seq_name}.txt"
+        hota_dict = compute_hota_metrics(ann_file, out_metrics)
+        hota_scores[seq_name] = hota_dict['hota']
+
+    # Add HOTA column to summary
+    hota_values = [hota_scores.get(name, 0.0) for name in names]
+    # Compute overall HOTA as mean
+    overall_hota = np.mean(hota_values) if hota_values else 0.0
+    summary['hota'] = hota_values + [overall_hota]
+
     if cfg.evaluation.verbose:
         str_summary = mm.io.render_summary(
             summary, formatters=mh.formatters, namemap=mm.io.motchallenge_metric_names
         )
         print("\n--- MOT Evaluation Results (per-seq + OVERALL) ---")
         print(str_summary)
+        print("\n--- HOTA Scores ---")
+        for seq_name, hota_score in hota_scores.items():
+            print(f"{seq_name}: {hota_score:.4f}")
+        print(f"OVERALL: {overall_hota:.4f}")
 
     summary_path = f"{metrics_prefix}.summary.csv"
     summary.to_csv(summary_path)
@@ -636,6 +659,11 @@ def _ml_pretrain(cfg, device):
         optimizer, OmegaConf.select(cfg, "training.scheduler"), int(cfg.training.steps)
     )
 
+    _max_k_max = OmegaConf.select(cfg, "training.max_k_max")
+    _max_k_max = int(_max_k_max) if _max_k_max is not None else None
+    _max_k_warmup = OmegaConf.select(cfg, "training.max_k_warmup")
+    _max_k_warmup = int(_max_k_warmup) if _max_k_warmup is not None else None
+
     train_triplet(
         model=model,
         dataset=dataset,
@@ -645,8 +673,9 @@ def _ml_pretrain(cfg, device):
         k_per_id=cfg.training.k_per_id,
         margin=cfg.training.margin,
         max_k=cfg.training.max_k,
+        max_k_max=_max_k_max,
+        max_k_warmup=_max_k_warmup,
         ce_weight=cfg.training.ce_weight,
-        hard_negatives=cfg.training.hard_negatives,
         freeze_backbone=cfg.training.freeze_backbone,
         device=device,
         scheduler=scheduler,
@@ -704,7 +733,11 @@ def _ml_test(cfg, det_model, device):
         raise ValueError("mode=test requires `data.val.root`.")
 
     state = _load_state_dict(cfg.reid.checkpoint_pretrain, device)
-    if _is_wrapped_embedder_state(state):
+    if state is None:
+        # No pretrained checkpoint; use ImageNet weights only.
+        model = _build_ml_model(cfg, device, imagenet_init=True)
+        print("[ml/test] using ImageNet weights, no pretrained checkpoint")
+    elif _is_wrapped_embedder_state(state):
         # Full EmbeddingModel checkpoint (backbone + head, from a prior ML
         # mode=train run). Build an empty wrapper and load everything.
         num_classes = 0
@@ -723,6 +756,28 @@ def _ml_test(cfg, det_model, device):
             print("[ml/test] WARNING: raw backbone + testing.steps=0 → "
                   "embeddings are a random projection of backbone features; "
                   "MOT metrics will be essentially random.")
+
+    # Resume: load finetuned checkpoint + existing history when testing.resume=true.
+    resume = bool(OmegaConf.select(cfg, "testing.resume"))
+    prior_history = None
+    step_offset = 0
+    if resume:
+        ckpt_path = str(cfg.reid.checkpoint_finetuned)
+        if os.path.exists(ckpt_path):
+            resume_state = _load_state_dict(ckpt_path, device)
+            model.load_state_dict(resume_state)
+            print(f"[ml/test] resumed weights from {ckpt_path}")
+        else:
+            print(f"[ml/test] resume=true but {ckpt_path} not found — starting fresh")
+        hist_path = str(cfg.output.history_path)
+        if os.path.exists(hist_path):
+            with open(hist_path) as f:
+                prior_history = json.load(f)
+            loss_steps = prior_history.get("loss", {}).get("steps", [])
+            step_offset = loss_steps[-1] if loss_steps else 0
+            print(f"[ml/test] appending to existing history (step_offset={step_offset})")
+        else:
+            print(f"[ml/test] no history at {hist_path} — starting fresh history")
 
     steps = int(cfg.testing.steps)
     if steps > 0:
@@ -766,6 +821,12 @@ def _ml_test(cfg, det_model, device):
                 torch.save(model.state_dict(), stepped)
                 print(f"[ml/test] ckpt@step={step} → {stepped}")
 
+        _max_k_max = OmegaConf.select(cfg, "testing.max_k_max")
+        _max_k_max = int(_max_k_max) if _max_k_max is not None else None
+        _max_k_warmup = OmegaConf.select(cfg, "testing.max_k_warmup")
+        _max_k_warmup = int(_max_k_warmup) if _max_k_warmup is not None else None
+        _freeze_bn = bool(OmegaConf.select(cfg, "testing.freeze_bn") or False)
+
         train_triplet(
             model=model,
             dataset=dataset,
@@ -775,8 +836,9 @@ def _ml_test(cfg, det_model, device):
             k_per_id=cfg.testing.k_per_id,
             margin=cfg.testing.margin,
             max_k=cfg.testing.max_k,
+            max_k_max=_max_k_max,
+            max_k_warmup=_max_k_warmup,
             ce_weight=cfg.testing.ce_weight,
-            hard_negatives=cfg.testing.hard_negatives,
             freeze_backbone=False,  # already applied above
             device=device,
             scheduler=scheduler,
@@ -791,6 +853,9 @@ def _ml_test(cfg, det_model, device):
             log_every=int(cfg.testing.log_every),
             desc="ml finetune",
             mode="test",
+            step_offset=step_offset,
+            prior_history=prior_history,
+            freeze_bn=_freeze_bn,
         )
 
         os.makedirs(os.path.dirname(cfg.reid.checkpoint_finetuned) or ".", exist_ok=True)
@@ -799,7 +864,11 @@ def _ml_test(cfg, det_model, device):
     else:
         print("[ml/test] steps=0 — skipping finetuning, evaluating pretrain weights")
 
-    _run_final_mot(cfg, det_model, model, device)
+    run_mot = OmegaConf.select(cfg, "evaluation.run_mot")
+    if run_mot is None or bool(run_mot):
+        _run_final_mot(cfg, det_model, model, device)
+    else:
+        print("[ml/test] evaluation.run_mot=false — skipping final MOT eval")
 
 
 # ---------- pretrained-only (no training) -----------------------------------
